@@ -13,7 +13,9 @@ public static partial class BeetleTools
 {
     [McpServerTool(Name = "list_processes", ReadOnly = true, Idempotent = true)]
     [Description(@"Lists processes recorded in a .beetle, with optional filtering and paging. Each line:
-  startTime  name  pid=N  exitCode=E  exceptions=N  [pi]
+  startTime  name  pid=N  exitCode=E  durationMs=D  exceptions=N  [pi]
+
+If a process was still running at session end, 'exitCode' / 'durationMs' are replaced by 'stillRunningAtSessionEnd'.
 
 processIndex (the [pi] in brackets) is the canonical handle — pass it to other tools. PIDs are not unique within a session (Windows reuses them) so prefer processIndex.
 
@@ -21,12 +23,15 @@ Filters are AND-combined. Regexes are case-insensitive and matched against Image
     public static string ListProcesses(
         [Description("Absolute path to a .beetle file")] string path,
         [Description("Optional regex matched against the process image file name / file path basename")] string? processNameRegex = null,
+        [Description("Optional regex matched against the process image file name / file path basename — exclusion")] string? excludeProcessNameRegex = null,
         [Description("Optional regex matched against the command line")] string? commandLineRegex = null,
         [Description("Optional explicit list of PIDs to include (note: PIDs are reused — prefer processIndices)")] int[]? processIds = null,
         [Description("Optional ISO 8601 lower bound (UTC) on process StartTime")] DateTime? startedAfter = null,
         [Description("Optional ISO 8601 upper bound (UTC) on process StartTime")] DateTime? startedBefore = null,
         [Description("Optional: only include processes that have at least N exceptions")] int? minExceptionCount = null,
-        [Description("Sort order: 'startTime' (default), 'exceptions', 'name'")] string? sortBy = null,
+        [Description("Optional: only include processes whose recorded duration (StopTime-StartTime) is at least this many ms. Processes still running at session end are excluded.")] double? minDurationMs = null,
+        [Description("Optional: only include processes that did NOT exit cleanly (exitCode != 0 OR still running at session end). Useful when looking for killed/timed-out processes.")] bool? notExitedCleanly = null,
+        [Description("Sort order: 'startTime' (default), 'exceptions', 'duration', 'name'")] string? sortBy = null,
         [Description("Number of leading entries to skip (default 0)")] int? skip = null,
         [Description("Maximum number of entries to return (default 200, max 5000)")] int? maxResults = null) => Run(() =>
     {
@@ -37,21 +42,30 @@ Filters are AND-combined. Regexes are case-insensitive and matched against Image
         var filter = CompiledFilter.Build(
             processIndices: null, excludeProcessIndices: null,
             processIds: processIds, excludeProcessIds: null,
-            processNameRegex: processNameRegex, excludeProcessNameRegex: null,
+            processNameRegex: processNameRegex, excludeProcessNameRegex: excludeProcessNameRegex,
             commandLineRegex: commandLineRegex,
             exceptionTypeRegex: null, excludeExceptionTypeRegex: null,
             messageRegex: null, excludeMessageRegex: null,
             startTime: null, endTime: null, aroundTime: null, windowMs: null);
 
+        static double Duration(Process p) =>
+            p.StopTimeRelativeMSec > 0 ? p.StopTimeRelativeMSec - p.StartTimeRelativeMSec : 0;
+
+        static bool ExitedCleanly(Process p) =>
+            p.StopTimeRelativeMSec > 0 && p.ExitCode == 0;
+
         var matches = filter.FilterProcesses(entry.Session)
             .Where(t => !startedAfter.HasValue || entry.ToAbsolute(t.process.StartTimeRelativeMSec) >= startedAfter.Value)
             .Where(t => !startedBefore.HasValue || entry.ToAbsolute(t.process.StartTimeRelativeMSec) <= startedBefore.Value)
             .Where(t => !minExceptionCount.HasValue || t.process.Exceptions.Count >= minExceptionCount.Value)
+            .Where(t => !minDurationMs.HasValue || Duration(t.process) >= minDurationMs.Value)
+            .Where(t => !(notExitedCleanly ?? false) || !ExitedCleanly(t.process))
             .ToList();
 
         IEnumerable<(int pi, Process p)> ordered = (sortBy ?? "startTime").ToLowerInvariant() switch
         {
             "exceptions" => matches.OrderByDescending(t => t.process.Exceptions.Count).ThenBy(t => t.process.StartTimeRelativeMSec),
+            "duration" => matches.OrderByDescending(t => Duration(t.process)).ThenBy(t => t.process.StartTimeRelativeMSec),
             "name" => matches.OrderBy(t => Format.ProcessName(t.process), StringComparer.OrdinalIgnoreCase),
             _ => matches.OrderBy(t => t.process.StartTimeRelativeMSec)
         };

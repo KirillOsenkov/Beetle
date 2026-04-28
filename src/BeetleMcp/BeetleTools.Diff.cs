@@ -43,20 +43,31 @@ Filters mirror query_exceptions but the output is a histogram, not individual ev
         [Description("Restrict to these processIndex values")] int[]? processIndices = null,
         [Description("Exclude these processIndex values")] int[]? excludeProcessIndices = null,
         [Description("Regex matched against process image file name / file path basename")] string? processNameRegex = null,
+        [Description("Regex matched against process image file name / file path basename — exclusion")] string? excludeProcessNameRegex = null,
         [Description("Regex on exception type")] string? exceptionTypeRegex = null,
+        [Description("Regex on exception type — exclusion")] string? excludeExceptionTypeRegex = null,
         [Description("Regex on exception message")] string? messageRegex = null,
         [Description("Inclusive lower bound on exception timestamp (UTC)")] DateTime? startTime = null,
         [Description("Inclusive upper bound on exception timestamp (UTC)")] DateTime? endTime = null,
+        [Description("Center of a time window (UTC). Combine with windowMs.")] DateTime? aroundTime = null,
+        [Description("Center of a time window expressed as offset from session start, e.g. '30m'. Mutually exclusive with aroundTime.")] string? aroundOffset = null,
+        [Description("Half-window in milliseconds around aroundTime / aroundOffset. Default 5000 when an around* value is set.")] double? windowMs = null,
         [Description("Maximum rows to return (default 500, max 5000). Histogram is truncated after sorting.")] int? maxResults = null) => Run(() =>
     {
         int take = Math.Clamp(maxResults ?? 500, 1, MaxAllowedResults);
         var grouping = ParseGrouping(groupBy);
         var entry = Cache.Load(path);
+        var resolvedAround = ResolveAroundTime(entry, aroundTime, aroundOffset);
+        if (resolvedAround.HasValue && !windowMs.HasValue)
+        {
+            windowMs = 5000;
+        }
+
         var filter = CompiledFilter.Build(
             processIndices, excludeProcessIndices, null, null,
-            processNameRegex, null, null,
-            exceptionTypeRegex, null, messageRegex, null,
-            startTime, endTime, null, null);
+            processNameRegex, excludeProcessNameRegex, null,
+            exceptionTypeRegex, excludeExceptionTypeRegex, messageRegex, null,
+            startTime, endTime, resolvedAround, windowMs);
 
         var counts = new Dictionary<string, int>(StringComparer.Ordinal);
         int total = 0;

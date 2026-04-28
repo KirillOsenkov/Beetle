@@ -24,15 +24,17 @@ PIDs are **reused** within a single recording (Windows recycles them quickly). D
 
 ## The core loop
 
+0. **Narrow down first.** On any unfamiliar file, start by identifying the small set of processes that actually matter for the question being asked, and ignore the rest. A .beetle typically contains hundreds of processes — OS background tasks, telemetry, log collectors, post-mortem dump tools — and lumping them together with the workload makes histograms and timelines misleading. Use `list_processes` (sorted by exceptions or duration) to find the workload-bearing process(es), then pass `processIndices=[pi,...]` to every subsequent tool. Only widen the scope if narrowing produced nothing useful.
 1. **`get_session_summary <path>`** — file size, recording window (UTC), eventsLost, processes, exceptions, distinct exception types. Always cheap.
-2. **`count_exceptions <path>`** — the type histogram (groupBy='type' by default). This is your triage primitive. Switch to groupBy='type+message' when many sites share a type.
-3. **`query_exceptions <path> ...filters...`** — narrow down to interesting ones; copy `[pi/ei]` ids out.
-4. **`get_exception <path> <pi/ei>`** — full stack trace.
-5. Drill sideways: `list_processes`, `get_process`, `get_process_tree`, `get_process_parent_chain`, `get_process_children`, `list_modules`, `list_native_images`.
+2. **`list_processes <path> sortBy=exceptions`** (and/or `sortBy=duration`, or `notExitedCleanly=true`) — identify the interesting processes. Each line shows `durationMs` and `exitCode` (or `stillRunningAtSessionEnd`), so killed/timed-out processes stand out at a glance.
+3. **`count_exceptions <path> processIndices=[pi,...]`** — the type histogram, scoped to the workload. groupBy='type' by default; switch to 'type+message' when many sites share a type.
+4. **`query_exceptions <path> processIndices=[pi,...] ...filters...`** — sample interesting ones; copy `[pi/ei]` ids out.
+5. **`get_exception <path> <pi/ei>`** — full stack trace.
+6. Drill sideways: `get_process`, `get_process_tree`, `get_process_parent_chain`, `get_process_children`, `list_modules`, `list_native_images`.
 
 Files are loaded on first use and cached. `load_beetle` / `reload_beetle` / `unload_beetle` are explicit controls.
 
-## Filter reference (shared by query_exceptions / count_exceptions / diff_exceptions)
+## Filter reference (shared by query_exceptions / count_exceptions / bin_exceptions / exceptions_around_time)
 
 | Filter | Meaning |
 |--------|---------|
@@ -44,29 +46,36 @@ Files are loaded on first use and cached. `load_beetle` / `reload_beetle` / `unl
 | `messageRegex` / `excludeMessageRegex` | regex against `ExceptionMessage` |
 | `startTime` / `endTime` | absolute UTC bounds on exception timestamp |
 | `aroundTime` + `windowMs` | center +/- windowMs (intersected with start/end if both supplied) |
+| `aroundOffset` + `windowMs` | center expressed as offset from session start, e.g. `'30m'`, `'+1800s'`, `'5400000ms'`. Mutually exclusive with `aroundTime`. |
 
-All regexes are case-insensitive. All filters AND together.
+All regexes are case-insensitive. All filters AND together. `aroundOffset` accepts a leading `+` / `-` and one of `ms` / `s` / `m` / `h`; a bare number is milliseconds.
+
+Tools vary in which subset of these they expose — `query_exceptions` and `bin_exceptions` are the most permissive; `list_processes` only has the process-side filters; `exceptions_around_time` is scoped to the around* form.
+
+## Output projection (query_exceptions / exceptions_around_time)
+
+Pass `fields="timestamp,type,id"` (or any comma-separated subset of `timestamp,process,type,message,id`; aliases `ts`, `time`, `proc`, `msg`) to drop columns from each line. Default is the full line. Use this when you only need timestamps for binning, or only `[pi/ei]` ids to feed into `get_exception` — it cuts response size 5–10× on large dumps.
 
 ## Counts vs samples
 
-Like with binlogs:
-
-- `query_exceptions` is **capped + paged** (default 200 / max 5000). The header ends with `matched=N+` if the cap was hit.
+- `query_exceptions` is **capped + paged** (default 200 / max 5000). The header ends with `matched=N+, nextSkip=K` if the cap was hit; pass `K` as the next call's `skip` to continue.
 - `count_exceptions` makes a **full pass with no cap**, sorts by frequency, and truncates the *output* (not the count). Pick a `groupBy` to control the histogram key. Use this when you need the truth.
+- `bin_exceptions` makes a **full pass** and groups matching events into time buckets (default 1 minute). One row per bucket: `<bucketStartIso>\t<count>`. Use this when the question is about *when* things fired, not *what*.
 - `diff_exceptions` builds full histograms on both files and produces three sections: ONLY IN LEFT, ONLY IN RIGHT, COMMON DELTA. Same `groupBy` knob.
 
 Decision rule:
 - "show me a few" → `query_exceptions`
 - "what's the histogram?" → `count_exceptions` (groupBy='type' for triage; 'type+message' for finer signal)
+- "how does activity change over time?" → `bin_exceptions` (binSize='1m' / '10s' / '1h' as appropriate)
 - "what's different between these two runs?" → `diff_exceptions`
 
 ## Recipes
 
 ### Cold-start triage (do this first on any unfamiliar file)
 1. `get_session_summary <path>` — note `eventsLost` (non-zero means the recording dropped some events under load — don't over-trust counts), session window, process count, exception count.
-2. `count_exceptions <path>` — see the top types. The long tail of `OperationCanceledException` / `TaskCanceledException` is usually noise; user-defined exceptions are usually signal.
-3. `list_processes <path> sortBy=exceptions` — which processes throw the most? Often one rogue process dominates.
-4. `query_exceptions <path> processNameRegex=<theInterestingOne> exceptionTypeRegex=<theInterestingType> maxResults=20` — sample the actual events.
+2. **Identify the workload.** `list_processes <path> sortBy=exceptions` — which processes throw the most? Cross-reference with `sortBy=duration` and `notExitedCleanly=true` if the question is about hangs/timeouts. The handful of processes at the top is almost always your real subject; the rest are OS / telemetry / log-collection noise to be excluded.
+3. Scope every subsequent call. `count_exceptions <path> processIndices=[pi,...]` to see the type histogram for just the workload. The long tail of `OperationCanceledException` / `TaskCanceledException` is usually noise; user-defined exceptions are usually signal.
+4. `query_exceptions <path> processIndices=[pi,...] exceptionTypeRegex=<theInterestingType> maxResults=20` — sample the actual events.
 5. `get_exception <path> <pi/ei>` on a representative one for the stack trace.
 
 ### Diff a "good" run against a "bad" run
@@ -87,7 +96,23 @@ You have a test log line like: `[2026-04-27T13:42:18.123Z] FAIL TestFooBar`. You
 3. For the suspicious one(s): `get_exception <path> <pi/ei>`.
 4. Optionally constrain by process: `exceptions_around_time <path> aroundTime=... processNameRegex=testhost`.
 
+If you're thinking in offsets ("what fired around minute 18 of the session?") use `aroundOffset` instead: `exceptions_around_time <path> aroundOffset=18m windowMs=30000`. `aroundOffset` accepts `30m`, `+1800s`, `5400000ms`, etc.
+
 Note: `Session.StartTime` is UTC; align your external log timestamps to UTC before querying.
+
+### Timeline / activity over time
+You want to know *when* exceptions fire, not what they are — e.g. "is there a long quiet gap?" or "where's the activity peak?".
+
+1. Scope to the workload first: `list_processes <path> sortBy=exceptions` and pick a `[pi]`.
+2. `bin_exceptions <path> processIndices=[pi] binSize=1m` — one row per minute, `<bucketStartIso>\t<count>`.
+3. Adjust `binSize` (`10s`, `30s`, `5m`, `1h`) to taste. Empty buckets between activity are emitted with count 0 so a gap is visible.
+4. To compare two runs, run `bin_exceptions` on each with the same filters and the same `binSize`, then read the rows side-by-side.
+
+### Bulk-fetch only what you need
+If you're going to post-process many exceptions externally (e.g. parse timestamps), use `query_exceptions` with `fields="timestamp,id"` to get a much smaller response. Pair with `nextSkip` paging:
+
+1. `query_exceptions <path> processIndices=[pi] fields=timestamp,id maxResults=5000`
+2. If the header shows `matched=5000+, nextSkip=5000`, call again with `skip=5000` and continue until the cap isn't hit.
 
 ### Root-cause walk-back from a known failure
 You found exception `[42/17]` and you want to see what fired in the same process **just before** it.
@@ -111,7 +136,7 @@ Sometimes the question is structural ("which child processes did `dotnet test.ex
 
 ## Output format reminders
 
-- Process line: `<startTime>  <name> pid=N exitCode=E exceptions=N [pi]`
+- Process line: `<startTime>  <name> pid=N exitCode=E durationMs=D exceptions=N [pi]` (when the process exited within the session). For processes that were still running when the session ended, `exitCode=E durationMs=D` is replaced by `stillRunningAtSessionEnd`.
 - Exception line: `<timestamp>  <name> pid=N  ExceptionType: message [pi/ei]` (the process columns are dropped inside scoped tools).
 - Headers always include `(skip=A, take=B, matched=C)`. A trailing `+` on `matched` means the result cap was hit; switch to `count_exceptions` for the true total.
 

@@ -21,9 +21,14 @@ Filters are AND-combined. All regexes are case-insensitive.
 Time window options:
   startTime / endTime  — absolute ISO-8601 UTC bounds
   aroundTime + windowMs — center +/- windowMs (great for correlating with timestamps from a test log)
-If both are supplied the intersection is used.
+  aroundOffset — offset from session start, e.g. '30m', '+1800s', '5400000ms'. Resolves to an aroundTime; combine with windowMs.
+If both absolute and around forms are supplied the intersection is used.
 
-If the result count exceeds the cap, the header ends with 'matched=N+' meaning more matches were truncated. To get a cap-free total without paging, use count_exceptions.")]
+fields controls projection (compact output for large dumps):
+  default = full line with all fields. Pass a comma-separated subset of
+  'timestamp,process,type,message,id' to keep only those columns. Aliases: 'ts','time','proc','msg'. 'all' / 'full' = default.
+
+If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K' so a follow-up call can pass skip=K to continue. To get a cap-free total without paging, use count_exceptions.")]
     public static string QueryExceptions(
         [Description("Absolute path to a .beetle file")] string path,
         [Description("Restrict to these processIndex values (canonical handle; PIDs are reused so prefer this)")] int[]? processIndices = null,
@@ -34,13 +39,15 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
         [Description("Regex matched against process image file name / file path basename — exclusion")] string? excludeProcessNameRegex = null,
         [Description("Regex matched against the command line")] string? commandLineRegex = null,
         [Description("Regex matched against the .NET ExceptionType (e.g. 'TaskCanceledException')")] string? exceptionTypeRegex = null,
-        [Description("Regex against the .NET ExceptionType — exclusion (e.g. '^System\\.OperationCanceledException$')")] string? excludeExceptionTypeRegex = null,
+        [Description(@"Regex against the .NET ExceptionType — exclusion (e.g. '^System\.OperationCanceledException$')")] string? excludeExceptionTypeRegex = null,
         [Description("Regex matched against the exception message")] string? messageRegex = null,
         [Description("Regex against the exception message — exclusion")] string? excludeMessageRegex = null,
         [Description("Inclusive lower bound on exception timestamp (UTC, ISO 8601)")] DateTime? startTime = null,
         [Description("Inclusive upper bound on exception timestamp (UTC, ISO 8601)")] DateTime? endTime = null,
-        [Description("Center of a time window. Combine with windowMs.")] DateTime? aroundTime = null,
-        [Description("Half-window in milliseconds around aroundTime. Default 5000 (10s window).")] double? windowMs = null,
+        [Description("Center of a time window (UTC, ISO 8601). Combine with windowMs.")] DateTime? aroundTime = null,
+        [Description("Center of a time window expressed as offset from session start, e.g. '30m', '+1800s', '5400000ms'. Combine with windowMs. Mutually exclusive with aroundTime.")] string? aroundOffset = null,
+        [Description("Half-window in milliseconds around aroundTime / aroundOffset. Default 5000 (10s window).")] double? windowMs = null,
+        [Description("Comma-separated subset of 'timestamp,process,type,message,id' (aliases: ts, time, proc, msg). Default: all.")] string? fields = null,
         [Description("Include each result's full stack trace inline (expensive). Default false.")] bool? includeStackTrace = null,
         [Description("Number of leading results to skip (default 0)")] int? skip = null,
         [Description("Maximum number of results to return (default 200, max 5000)")] int? maxResults = null) => Run(() =>
@@ -48,12 +55,15 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
         int offset = Math.Max(skip ?? 0, 0);
         int take = Math.Clamp(maxResults ?? DefaultMaxResults, 1, MaxAllowedResults);
         bool withStack = includeStackTrace ?? false;
-        if (aroundTime.HasValue && !windowMs.HasValue)
+        var projected = Format.ParseExceptionFields(fields);
+
+        var entry = Cache.Load(path);
+        var resolvedAround = ResolveAroundTime(entry, aroundTime, aroundOffset);
+        if (resolvedAround.HasValue && !windowMs.HasValue)
         {
             windowMs = 5000;
         }
 
-        var entry = Cache.Load(path);
         var filter = CompiledFilter.Build(
             processIndices, excludeProcessIndices,
             processIds, excludeProcessIds,
@@ -61,7 +71,7 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
             commandLineRegex,
             exceptionTypeRegex, excludeExceptionTypeRegex,
             messageRegex, excludeMessageRegex,
-            startTime, endTime, aroundTime, windowMs);
+            startTime, endTime, resolvedAround, windowMs);
 
         // Stream the filter, skipping `offset`, collecting up to `take` into the page.
         // We peek one extra item after the page is full to detect overflow ("matched=N+").
@@ -95,7 +105,7 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
           .Append(", matched=").Append(matched);
         if (capHit)
         {
-            sb.Append('+');
+            sb.Append("+, nextSkip=").Append(offset + page.Count);
         }
 
         sb.AppendLine(")");
@@ -108,7 +118,7 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
 
         foreach (var r in page)
         {
-            sb.AppendLine(Format.ExceptionLine(entry, r));
+            sb.AppendLine(Format.ExceptionLine(r, projected));
             if (withStack)
             {
                 var trace = entry.Session.ComputeStackTrace(r.Process, r.Exception);
@@ -194,26 +204,39 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
     });
 
     [McpServerTool(Name = "exceptions_around_time", ReadOnly = true, Idempotent = true)]
-    [Description(@"Convenience over query_exceptions: return all exceptions within +/- windowMs of a target time, ordered by timestamp. Use this to correlate a .beetle with timestamps from an external test/CI log.")]
+    [Description(@"Convenience over query_exceptions: return all exceptions within +/- windowMs of a target time, ordered by timestamp. Use this to correlate a .beetle with timestamps from an external test/CI log.
+
+Provide either aroundTime (absolute UTC) or aroundOffset (relative to session start, e.g. '30m', '+1800s'). Filters mirror query_exceptions.")]
     public static string ExceptionsAroundTime(
         [Description("Absolute path to a .beetle file")] string path,
-        [Description("Target time (UTC, ISO 8601)")] DateTime aroundTime,
+        [Description("Target time (UTC, ISO 8601). Provide this OR aroundOffset.")] DateTime? aroundTime = null,
+        [Description("Target time as offset from session start, e.g. '30m', '+1800s'. Provide this OR aroundTime.")] string? aroundOffset = null,
         [Description("Half-window in milliseconds (default 5000 = 10s window)")] double? windowMs = null,
+        [Description("Restrict to these processIndex values")] int[]? processIndices = null,
+        [Description("Exclude these processIndex values")] int[]? excludeProcessIndices = null,
         [Description("Optional regex on process image file name / file path basename")] string? processNameRegex = null,
+        [Description("Optional regex on process image file name / file path basename — exclusion")] string? excludeProcessNameRegex = null,
         [Description("Optional regex on exception type")] string? exceptionTypeRegex = null,
+        [Description("Optional regex on exception type — exclusion")] string? excludeExceptionTypeRegex = null,
+        [Description("Comma-separated subset of 'timestamp,process,type,message,id'. Default: all.")] string? fields = null,
         [Description("Number of leading results to skip (default 0)")] int? skip = null,
         [Description("Maximum number of results (default 200, max 5000)")] int? maxResults = null) => Run(() =>
     {
         int offset = Math.Max(skip ?? 0, 0);
         int take = Math.Clamp(maxResults ?? DefaultMaxResults, 1, MaxAllowedResults);
         double half = windowMs ?? 5000;
+        var projected = Format.ParseExceptionFields(fields);
 
         var entry = Cache.Load(path);
+        var resolvedAround = ResolveAroundTime(entry, aroundTime, aroundOffset)
+            ?? throw new ModelContextProtocol.McpException(
+                "exceptions_around_time requires either aroundTime (absolute UTC) or aroundOffset (offset from session start).");
+
         var filter = CompiledFilter.Build(
-            null, null, null, null,
-            processNameRegex, null, null,
-            exceptionTypeRegex, null, null, null,
-            null, null, aroundTime, half);
+            processIndices, excludeProcessIndices, null, null,
+            processNameRegex, excludeProcessNameRegex, null,
+            exceptionTypeRegex, excludeExceptionTypeRegex, null, null,
+            null, null, resolvedAround, half);
 
         // Order by timestamp, then page. Filter is bounded by the +/- window so
         // the materialized list is small enough to sort in memory.
@@ -224,7 +247,7 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
         var page = ordered.Skip(offset).Take(take).ToList();
 
         var sb = new StringBuilder();
-        sb.Append("around: ").AppendLine(Format.Iso(aroundTime));
+        sb.Append("around: ").AppendLine(Format.Iso(resolvedAround));
         sb.Append("window: +/-").Append(Format.Ms(half)).AppendLine(" ms");
         sb.Append("exceptions: ").Append(page.Count)
           .Append(" (skip=").Append(offset)
@@ -240,7 +263,7 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
 
         foreach (var r in page)
         {
-            sb.AppendLine(Format.ExceptionLine(entry, r));
+            sb.AppendLine(Format.ExceptionLine(r, projected));
         }
 
         return sb.ToString();
@@ -325,5 +348,31 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
         }
 
         return (pi, ei);
+    }
+
+    /// <summary>
+    /// Resolve aroundTime from either an absolute UTC timestamp or a relative offset
+    /// against <c>Session.StartTime</c>. Returns null if neither is supplied; throws
+    /// <see cref="ModelContextProtocol.McpException"/> if both are supplied.
+    /// </summary>
+    internal static DateTime? ResolveAroundTime(LoadedBeetle entry, DateTime? aroundTime, string? aroundOffset)
+    {
+        if (aroundTime.HasValue && !string.IsNullOrWhiteSpace(aroundOffset))
+        {
+            throw new ModelContextProtocol.McpException(
+                "Provide either aroundTime (absolute UTC) or aroundOffset (offset from session start), not both.");
+        }
+
+        if (aroundTime.HasValue)
+        {
+            return aroundTime;
+        }
+
+        if (!string.IsNullOrWhiteSpace(aroundOffset))
+        {
+            return entry.ToAbsolute(Format.ParseRelativeMs(aroundOffset));
+        }
+
+        return null;
     }
 }
