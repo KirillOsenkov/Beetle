@@ -15,3 +15,24 @@ Starts recording and returns immediately, while another instance of beetle.exe c
 `beetle.exe stop`
 Finds an existing instance of beetle.exe and stops recording, waits for it to finish
 writing the log, then returns.
+
+## BeetleMcp (MCP server for AI)
+
+`beetlemcp` lets an AI assistant (Claude / Copilot / etc.) read and analyze `.beetle` files: list processes, query/count/bin exceptions, walk parent chains, fetch stack traces, diff two recordings, and more.
+
+```
+dotnet tool update -g beetlemcp
+```
+
+Configure your MCP-aware client to launch it. For VS Code, add to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "beetlemcp": {
+      "type": "stdio",
+      "command": "beetlemcp"
+    }
+  }
+}
+```
