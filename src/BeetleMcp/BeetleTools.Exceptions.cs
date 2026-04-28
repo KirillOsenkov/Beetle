@@ -30,7 +30,7 @@ fields controls projection (compact output for large dumps):
 
 If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K' so a follow-up call can pass skip=K to continue. To get a cap-free total without paging, use count_exceptions.")]
     public static string QueryExceptions(
-        [Description("Absolute path to a .beetle file")] string path,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
         [Description("Restrict to these processIndex values (canonical handle; PIDs are reused so prefer this)")] int[]? processIndices = null,
         [Description("Exclude these processIndex values")] int[]? excludeProcessIndices = null,
         [Description("Restrict to these PIDs (note: not unique within a session)")] int[]? processIds = null,
@@ -38,8 +38,8 @@ If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K
         [Description("Regex matched against process image file name / file path basename")] string? processNameRegex = null,
         [Description("Regex matched against process image file name / file path basename — exclusion")] string? excludeProcessNameRegex = null,
         [Description("Regex matched against the command line")] string? commandLineRegex = null,
-        [Description(@"Regex matched against the .NET ExceptionType (e.g. 'TaskCanceledException'). Backslashes must be JSON-escaped: write '^System\\.IO\\.IOException$', not '^System\.IO\.IOException$'. When in doubt, pass a plain substring like 'IOException' (matches are case-insensitive and partial).")] string? exceptionTypeRegex = null,
-        [Description(@"Regex against the .NET ExceptionType — exclusion. Backslashes must be JSON-escaped (e.g. '^System\\.OperationCanceledException$').")] string? excludeExceptionTypeRegex = null,
+        [Description("Regex matched against the .NET ExceptionType (e.g. 'TaskCanceledException')")] string? exceptionTypeRegex = null,
+        [Description(@"Regex against the .NET ExceptionType — exclusion (e.g. '^System\.OperationCanceledException$')")] string? excludeExceptionTypeRegex = null,
         [Description("Regex matched against the exception message")] string? messageRegex = null,
         [Description("Regex against the exception message — exclusion")] string? excludeMessageRegex = null,
         [Description("Inclusive lower bound on exception timestamp (UTC, ISO 8601)")] DateTime? startTime = null,
