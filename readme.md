@@ -42,3 +42,9 @@ Configure your MCP-aware client to launch it. For VS Code, add to `.vscode/mcp.j
   }
 }
 ```
+
+## Beetle.Core
+
+Beetle.Core is a NuGet package that lets you read (or write!) .beetle files and provides an object model around them.
+
+https://www.nuget.org/packages/Beetle.Core
