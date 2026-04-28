@@ -390,12 +390,12 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
     });
 
     [McpServerTool(Name = "list_modules", ReadOnly = true, Idempotent = true)]
-    [Description(@"Lists managed modules (assemblies) loaded in a process. Each line is tab-separated. Default columns: 'name  filePath  pdbGuid  methods=N'.
+    [Description(@"Lists managed modules (assemblies) loaded in a process. Each line is tab-separated. Default columns: 'name  filePath'.
 
 Tips for cutting noise:
   - excludeFrameworkModules=true hides the GAC, WinSxS / System32, and the dotnet shared frameworks.
   - nameRegex / pathRegex / excludePathRegex (case-insensitive) for surgical filters.
-  - fields=name,path (or any subset of name,path,pdb,methods) trims columns when you only need names.
+  - fields=name (or any subset of name,path,pdb) trims columns when you only need names. 'pdb' adds the PDB GUID for symbol matching.
 
 For 'is module X loaded anywhere?' across all processes, use find_module instead.")]
     public static string ListModules(
@@ -405,7 +405,7 @@ For 'is module X loaded anywhere?' across all processes, use find_module instead
         [Description("Optional regex on the module's file path")] string? pathRegex = null,
         [Description("Optional regex on the module's file path — exclusion")] string? excludePathRegex = null,
         [Description("If true, hide framework / system modules: the GAC, WinSxS / System32, and the dotnet shared frameworks (NETCore.App / AspNetCore.App / WindowsDesktop.App). Pair with nameRegex / excludePathRegex for finer scoping. Default false.")] bool? excludeFrameworkModules = null,
-        [Description("Comma-separated subset of 'name,path,pdb,methods'. Default: all.")] string? fields = null,
+        [Description("Comma-separated subset of 'name,path,pdb'. Default: name,path.")] string? fields = null,
         [Description("Number of leading entries to skip (default 0)")] int? skip = null,
         [Description("Maximum number of entries to return (default 200, max 5000)")] int? maxResults = null) => Run(() =>
     {
@@ -466,7 +466,13 @@ For 'is module X loaded anywhere?' across all processes, use find_module instead
     });
 
     [McpServerTool(Name = "find_module", ReadOnly = true, Idempotent = true)]
-    [Description(@"Searches for managed modules (by name or file path) across processes. One row per (process, module) match:
+    [Description(@"Searches for managed modules (by name or file path) across processes.
+
+Default output (grouped): one row per distinct (moduleName, filePath), sorted by loadedIn desc:
+  <moduleName>  <modulePath>  loadedIn=N  [pi1, pi2, ...]
+The bracketed [pi] list is truncated at 10 entries (extra count shown as '+N more').
+
+With expand=true: one row per (process, module) match (the previous behavior):
   [pi] <processName> pid=N  <moduleName>  <modulePath>
 
 Use this to answer 'is X loaded anywhere?' without dumping all modules per process. Scope with processIndices when you already know the workload.")]
@@ -476,6 +482,7 @@ Use this to answer 'is X loaded anywhere?' without dumping all modules per proce
         [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
         [Description("Restrict to these processIndex values")] int[]? processIndices = null,
         [Description("Optional regex matched against the process image file name / file path basename")] string? processNameRegex = null,
+        [Description("If true, emit one row per (process, module) match instead of grouped output. Default false.")] bool? expand = null,
         [Description("Number of leading entries to skip (default 0)")] int? skip = null,
         [Description("Maximum number of entries to return (default 500, max 5000)")] int? maxResults = null) => Run(() =>
     {
@@ -487,6 +494,7 @@ Use this to answer 'is X loaded anywhere?' without dumping all modules per proce
 
         int offset = Math.Max(skip ?? 0, 0);
         int take = Math.Clamp(maxResults ?? 500, 1, MaxAllowedResults);
+        bool expanded = expand ?? false;
         var entry = ResolveBeetle(path);
         var processes = entry.Session.Processes;
 
@@ -531,6 +539,75 @@ Use this to answer 'is X loaded anywhere?' without dumping all modules per proce
             }
         }
 
+        if (expanded)
+        {
+            return RenderExpanded(hits, offset, take);
+        }
+
+        return RenderGrouped(hits, offset, take);
+    });
+
+    private const int FindModuleSamplePiLimit = 10;
+
+    private static string RenderGrouped(List<(int pi, Process p, Module m)> hits, int offset, int take)
+    {
+        // Group by (module name, file path). Each group: count + sorted list of processIndex values.
+        var groups = hits
+            .GroupBy(h => (Name: h.m.Name ?? "<null>", Path: h.m.FilePath ?? "<null>"))
+            .Select(g => (
+                g.Key.Name,
+                g.Key.Path,
+                Pis: g.Select(h => h.pi).Distinct().OrderBy(i => i).ToList()))
+            .OrderByDescending(g => g.Pis.Count)
+            .ThenBy(g => g.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        int total = groups.Count;
+        var page = groups.Skip(offset).Take(take).ToList();
+
+        var sb = new StringBuilder();
+        sb.Append("modules: ").Append(page.Count)
+          .Append(" (skip=").Append(offset)
+          .Append(", take=").Append(take)
+          .Append(", matched=").Append(total)
+          .AppendLine(", grouped; pass expand=true for per-process rows)");
+
+        if (page.Count == 0)
+        {
+            sb.AppendLine("(no modules match)");
+            return sb.ToString();
+        }
+
+        foreach (var (name, path, pis) in page)
+        {
+            sb.Append(name).Append('\t').Append(path)
+              .Append('\t').Append("loadedIn=").Append(pis.Count)
+              .Append('\t').Append('[');
+
+            int show = Math.Min(pis.Count, FindModuleSamplePiLimit);
+            for (int i = 0; i < show; i++)
+            {
+                if (i > 0)
+                {
+                    sb.Append(", ");
+                }
+
+                sb.Append(pis[i]);
+            }
+
+            if (pis.Count > FindModuleSamplePiLimit)
+            {
+                sb.Append(", +").Append(pis.Count - FindModuleSamplePiLimit).Append(" more");
+            }
+
+            sb.AppendLine("]");
+        }
+
+        return sb.ToString();
+    }
+
+    private static string RenderExpanded(List<(int pi, Process p, Module m)> hits, int offset, int take)
+    {
         int total = hits.Count;
         var page = hits.Skip(offset).Take(take).ToList();
 
@@ -557,7 +634,7 @@ Use this to answer 'is X loaded anywhere?' without dumping all modules per proce
         }
 
         return sb.ToString();
-    });
+    }
 
     [McpServerTool(Name = "list_native_images", ReadOnly = true, Idempotent = true)]
     [Description(@"Lists native images (DLLs/EXEs) loaded into a process's address space. Each line: 'filePath  startAddress  size'.
@@ -633,15 +710,14 @@ excludeFrameworkModules=true hides Windows / dotnet shared / WinSxS entries (and
         Name = 1 << 0,
         Path = 1 << 1,
         Pdb = 1 << 2,
-        Methods = 1 << 3,
-        All = Name | Path | Pdb | Methods,
+        Default = Name | Path,
     }
 
     private static ModuleFields ParseModuleFields(string? fields)
     {
         if (string.IsNullOrWhiteSpace(fields))
         {
-            return ModuleFields.All;
+            return ModuleFields.Default;
         }
 
         ModuleFields result = 0;
@@ -652,15 +728,14 @@ excludeFrameworkModules=true hides Windows / dotnet shared / WinSxS entries (and
                 "name" => ModuleFields.Name,
                 "path" or "filepath" => ModuleFields.Path,
                 "pdb" or "pdbguid" => ModuleFields.Pdb,
-                "methods" or "methodcount" => ModuleFields.Methods,
                 _ => throw new ModelContextProtocol.McpException(
-                    $"Unknown field '{raw}'. Expected one of: name, path, pdb, methods."),
+                    $"Unknown field '{raw}'. Expected one of: name, path, pdb."),
             };
         }
 
         if (result == 0)
         {
-            return ModuleFields.All;
+            return ModuleFields.Default;
         }
 
         return result;
@@ -695,12 +770,6 @@ excludeFrameworkModules=true hides Windows / dotnet shared / WinSxS entries (and
         {
             Tab();
             sb.Append(m.PdbGuid == Guid.Empty ? "<no-pdb>" : m.PdbGuid.ToString());
-        }
-
-        if ((fields & ModuleFields.Methods) != 0)
-        {
-            Tab();
-            sb.Append("methods=").Append(m.Methods.Count);
         }
 
         sb.AppendLine();
