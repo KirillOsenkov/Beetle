@@ -157,7 +157,7 @@ If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K
         var ex = p.Exceptions[ei];
 
         var sb = new StringBuilder();
-        sb.Append("process: ").AppendLine(Format.ProcessLine(pi, p));
+        sb.Append("process: ").AppendLine(Format.ProcessLine(pi, p, entry.Session));
         sb.Append("exceptionId: ").Append(pi).Append('/').AppendLine(ei.ToString());
         sb.Append("timestamp: ").AppendLine(Format.Iso(ex.Timestamp));
         sb.Append("threadId: ").AppendLine(ex.ThreadId.ToString());

@@ -128,21 +128,37 @@ internal static class Format
     }
 
     /// <summary>
+    /// True if the process was still alive when the recording stopped.
+    /// Two cases: (1) no stop event was captured at all (StopTimeRelativeMSec &lt;= 0);
+    /// (2) the recorder stamped a synthetic STILL_ACTIVE (0x103 = 259) exit at trace-stop time.
+    /// </summary>
+    public static bool IsStillRunning(Process p, Session session)
+    {
+        if (p.StopTimeRelativeMSec <= 0)
+        {
+            return true;
+        }
+
+        return p.ExitCode == 259
+            && p.StopTimeRelativeMSec >= session.SessionEndTimeRelativeMSec - 200;
+    }
+
+    /// <summary>
     /// One-line process header: <c>"name pid=N exitCode=E durationMs=D exceptions=N [pi]"</c>.
     /// </summary>
-    public static string ProcessLine(int processIndex, Process p)
+    public static string ProcessLine(int processIndex, Process p, Session session)
     {
         var sb = new StringBuilder();
         sb.Append(ProcessName(p));
         sb.Append(" pid=").Append(p.Id);
-        if (p.StopTimeRelativeMSec > 0)
+        if (IsStillRunning(p, session))
         {
-            sb.Append(" exitCode=").Append(p.ExitCode);
-            sb.Append(" durationMs=").Append(Ms(p.StopTimeRelativeMSec - p.StartTimeRelativeMSec));
+            sb.Append(" stillRunningAtSessionEnd");
         }
         else
         {
-            sb.Append(" stillRunningAtSessionEnd");
+            sb.Append(" exitCode=").Append(p.ExitCode);
+            sb.Append(" durationMs=").Append(Ms(p.StopTimeRelativeMSec - p.StartTimeRelativeMSec));
         }
 
         sb.Append(" exceptions=").Append(p.Exceptions.Count);

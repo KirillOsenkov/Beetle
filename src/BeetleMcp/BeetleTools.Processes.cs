@@ -91,7 +91,7 @@ Filters are AND-combined. Regexes are case-insensitive and matched against Image
         [Description("Optional ISO 8601 upper bound (UTC) on process StartTime")] DateTime? startedBefore = null,
         [Description("Optional: only include processes that have at least N exceptions")] int? minExceptionCount = null,
         [Description("Optional: only include processes whose recorded duration (StopTime-StartTime) is at least this many ms. Processes still running at session end are excluded.")] double? minDurationMs = null,
-        [Description("Optional: only include processes that did NOT exit cleanly (exitCode != 0 OR still running at session end). Useful when looking for killed/timed-out processes.")] bool? notExitedCleanly = null,
+        [Description("Optional: only include processes that exited with a non-zero exit code. Useful when looking for failures. Processes still running at session end are excluded (their exit code is unknown).")] bool? notExitedCleanly = null,
         [Description("Optional: filter by managed-ness. true = only managed (.NET) processes (those that loaded mscorlib / System.Private.CoreLib); false = only unmanaged; null = both. Note: a process that crashed before loading the runtime can look unmanaged.")] bool? managed = null,
         [Description("Sort order: 'startTime' (default), 'exceptions', 'duration', 'name'")] string? sortBy = null,
         [Description("Number of leading entries to skip (default 0)")] int? skip = null,
@@ -113,8 +113,8 @@ Filters are AND-combined. Regexes are case-insensitive and matched against Image
         static double Duration(Process p) =>
             p.StopTimeRelativeMSec > 0 ? p.StopTimeRelativeMSec - p.StartTimeRelativeMSec : 0;
 
-        static bool ExitedCleanly(Process p) =>
-            p.StopTimeRelativeMSec > 0 && p.ExitCode == 0;
+        bool ExitedCleanly(Process p) =>
+            Format.IsStillRunning(p, entry.Session) || p.ExitCode == 0;
 
         var matches = filter.FilterProcesses(entry.Session)
             .Where(t => !startedAfter.HasValue || entry.ToAbsolute(t.process.StartTimeRelativeMSec) >= startedAfter.Value)
@@ -154,7 +154,7 @@ Filters are AND-combined. Regexes are case-insensitive and matched against Image
         foreach (var (pi, p) in page)
         {
             sb.Append(Format.Iso(entry.ToAbsolute(p.StartTimeRelativeMSec))).Append("  ");
-            sb.AppendLine(Format.ProcessLine(pi, p));
+            sb.AppendLine(Format.ProcessLine(pi, p, entry.Session));
         }
 
         return sb.ToString();
@@ -172,7 +172,7 @@ processIndex is the canonical handle — get it from list_processes or query_exc
         var p = ResolveProcess(entry, processIndex);
 
         var sb = new StringBuilder();
-        sb.Append(Format.ProcessLine(processIndex, p)).AppendLine();
+        sb.Append(Format.ProcessLine(processIndex, p, entry.Session)).AppendLine();
         sb.Append("commandLine: ").AppendLine(p.CommandLine ?? "<null>");
         sb.Append("filePath: ").AppendLine(p.FilePath ?? "<null>");
         sb.Append("imageFileName: ").AppendLine(p.ImageFileName ?? "<null>");
@@ -363,7 +363,7 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
                 sb.Append(' ');
             }
 
-            sb.AppendLine(Format.ProcessLine(i, processes[i]));
+            sb.AppendLine(Format.ProcessLine(i, processes[i], entry.Session));
             rendered++;
 
             bool subtreeAncestorMatched = ancestorMatched || selfMatches;
@@ -449,7 +449,7 @@ For 'is module X loaded anywhere?' across all processes, use find_module instead
         var page = ordered.Skip(offset).Take(take).ToList();
 
         var sb = new StringBuilder();
-        sb.Append("process: ").AppendLine(Format.ProcessLine(processIndex, p));
+        sb.Append("process: ").AppendLine(Format.ProcessLine(processIndex, p, entry.Session));
         sb.Append("modules: ").Append(page.Count)
           .Append(" (skip=").Append(offset)
           .Append(", take=").Append(take)
@@ -604,7 +604,7 @@ excludeFrameworkModules=true hides Windows / dotnet shared / WinSxS entries (and
         var page = ordered.Skip(offset).Take(take).ToList();
 
         var sb = new StringBuilder();
-        sb.Append("process: ").AppendLine(Format.ProcessLine(processIndex, p));
+        sb.Append("process: ").AppendLine(Format.ProcessLine(processIndex, p, entry.Session));
         sb.Append("nativeImages: ").Append(page.Count)
           .Append(" (skip=").Append(offset)
           .Append(", take=").Append(take)
@@ -808,7 +808,7 @@ The last (most-indented) line is the target. Useful for answering 'who started t
                 sb.Append(' ');
             }
 
-            sb.AppendLine(Format.ProcessLine(chain[depth], processes[chain[depth]]));
+            sb.AppendLine(Format.ProcessLine(chain[depth], processes[chain[depth]], entry.Session));
         }
 
         return sb.ToString();
@@ -880,7 +880,7 @@ Children are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse ca
         var page = collected.Skip(offset).Take(take).ToList();
 
         var sb = new StringBuilder();
-        sb.Append("parent: ").AppendLine(Format.ProcessLine(processIndex, parent));
+        sb.Append("parent: ").AppendLine(Format.ProcessLine(processIndex, parent, entry.Session));
         sb.Append(deep ? "descendants: " : "direct children: ").Append(page.Count)
           .Append(" (skip=").Append(offset)
           .Append(", take=").Append(take)
@@ -901,7 +901,7 @@ Children are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse ca
                 sb.Append(' ');
             }
 
-            sb.AppendLine(Format.ProcessLine(pi, processes[pi]));
+            sb.AppendLine(Format.ProcessLine(pi, processes[pi], entry.Session));
         }
 
         return sb.ToString();
