@@ -62,6 +62,8 @@ Files are loaded on first use and cached. `load_beetle` / `reload_beetle` / `unl
 
 All regexes are case-insensitive. All filters AND together. `aroundOffset` accepts a leading `+` / `-` and one of `ms` / `s` / `m` / `h`; a bare number is milliseconds.
 
+**Backslashes must be JSON-escaped.** Regex patterns are passed as JSON strings, so any `\` in the pattern must be doubled. To match `System.IO.IOException` write `^System\\.IO\\.IOException$` in the JSON arguments (which is the regex `^System\.IO\.IOException$`). A common symptom of forgetting this is the generic error *"An error occurred invoking '<tool>'."* — the JSON deserializer rejected the bad escape before the tool ran. If unsure, drop the anchors and dots and pass a substring like `IOException`; all matches are case-insensitive and partial by default.
+
 Tools vary in which subset of these they expose — `query_exceptions` and `bin_exceptions` are the most permissive; `list_processes` only has the process-side filters; `exceptions_around_time` is scoped to the around* form.
 
 ## Output projection (query_exceptions / exceptions_around_time / list_modules)

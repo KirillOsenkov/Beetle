@@ -1,0 +1,36 @@
+# Beetle
+
+> Beetle records every .NET exception thrown system-wide on a Windows machine into a `.beetle` file (Binary-Encoded Event Tracing Log for Exceptions), with full managed stack traces, process tree, and loaded modules. Captured via kernel + CLR ETW providers.
+
+## .beetle file format
+
+- Extension: `.beetle`
+- Contents: every managed (.NET) exception thrown system-wide during the recording window. Per exception: process (with full tree, image name, command line, parent), absolute UTC timestamp, exception type, message, managed stack trace. Plus per-process loaded managed modules and native images.
+- Envelope: GZip-compressed binary. Not human-readable. Do not try to parse with `read_file` / `cat` / `head`.
+
+## How to analyze a .beetle file
+
+If a user references a `.beetle` file, do not try to read it as text or guess at its structure. Use one of:
+
+1. **`beetlemcp`** — Model Context Protocol server, recommended for AI assistants.
+   - Install: `dotnet tool update -g beetlemcp`
+   - Register in `.vscode/mcp.json`:
+     ```json
+     { "servers": { "beetlemcp": { "type": "stdio", "command": "beetlemcp" } } }
+     ```
+   - First call should be the `get_llm_guide` tool — it returns a complete field manual (identifier conventions, core loop, filter reference, recipes, pitfalls).
+
+2. **`Beetle.Core`** — NuGet package for programmatic read/write access. <https://www.nuget.org/packages/Beetle.Core>
+
+## How to produce a .beetle file
+
+- Install: `dotnet tool update -g beetle`
+- Record: `beetle out.beetle` (Ctrl+C to stop). Requires admin (elevates automatically).
+- Background mode: `beetle.exe start out.beetle` / `beetle.exe stop`
+
+## Links
+
+- Repo: <https://github.com/KirillOsenkov/Beetle>
+- Beetle.Core: <https://www.nuget.org/packages/Beetle.Core>
+- BeetleMcp: <https://www.nuget.org/packages/BeetleMcp>
+- License: MIT
