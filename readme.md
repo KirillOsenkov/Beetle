@@ -2,6 +2,10 @@
 
 (**B**inary-**E**ncoded **E**vent **T**racing **L**og for **E**xceptions)
 
+```
+dotnet tool update -g beetle
+```
+
 Beetle is a tool that records all .NET exceptions with callstacks system-wide into a binary log file that can be viewed on another machine.
 
 Beetle starts a copy of itself under admin if it's not running as administrator. It needs admin permissions to create a kernel ETW session.
