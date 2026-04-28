@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <LangVersion>latest</LangVersion>
+    <DebugType>embedded</DebugType>
+    <Nullable>enable</Nullable>
+    <Prefer32Bit>false</Prefer32Bit>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>beetlemcp</ToolCommandName>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+    <PackageId>BeetleMcp</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Kirill Osenkov</Authors>
+    <Company>Microsoft</Company>
+    <PackageReadmeFile>LlmGuide.md</PackageReadmeFile>
+    <Description>A Model Context Protocol (MCP) server that exposes Beetle .beetle exception logs to LLMs.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/KirillOsenkov/Beetle</PackageProjectUrl>
+    <IconFilePath>$(MSBuildThisFileDirectory)..\..\icon.png</IconFilePath>
+    <PackageIcon>icon.png</PackageIcon>
+    <RepositoryUrl>https://github.com/KirillOsenkov/Beetle</RepositoryUrl>
+    <PackageTags>.NET dotnet beetle exception mcp llm ai diagnostic trace ETW</PackageTags>
+    <RootNamespace>BeetleMcp</RootNamespace>
+    <AssemblyName>beetlemcp</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="ModelContextProtocol" Version="1.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Beetle.Core\Beetle.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="$(IconFilePath)" Pack="true" PackagePath="" />
+    <None Include="LlmGuide.md" Pack="true" PackagePath="" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="LlmGuide.md">
+      <LogicalName>LlmGuide.md</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,6 @@
+/nologo
+/r
+/m
+/bl
+/verbosity:minimal
+/clp:Summary;ForceNoAlign

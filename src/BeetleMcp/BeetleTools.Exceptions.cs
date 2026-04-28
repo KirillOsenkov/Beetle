@@ -1,0 +1,332 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Linq;
+using System.Text;
+using GuiLabs.Dotnet.Recorder;
+using ModelContextProtocol.Server;
+
+namespace BeetleMcp;
+
+public static partial class BeetleTools
+{
+    [McpServerTool(Name = "query_exceptions", ReadOnly = true, Idempotent = true)]
+    [Description(@"Queries managed exceptions across all processes in a .beetle, with rich filters and paging. Default output is one line per exception:
+  <iso-timestamp>  <processName> pid=N  ExceptionType: message [pi/ei]
+
+Use [pi/ei] with get_exception / get_stack_trace.
+
+Filters are AND-combined. All regexes are case-insensitive.
+
+Time window options:
+  startTime / endTime  — absolute ISO-8601 UTC bounds
+  aroundTime + windowMs — center +/- windowMs (great for correlating with timestamps from a test log)
+If both are supplied the intersection is used.
+
+If the result count exceeds the cap, the header ends with 'matched=N+' meaning more matches were truncated. To get a cap-free total without paging, use count_exception_types or count_exception_messages.")]
+    public static string QueryExceptions(
+        [Description("Absolute path to a .beetle file")] string path,
+        [Description("Restrict to these processIndex values (canonical handle; PIDs are reused so prefer this)")] int[]? processIndices = null,
+        [Description("Exclude these processIndex values")] int[]? excludeProcessIndices = null,
+        [Description("Restrict to these PIDs (note: not unique within a session)")] int[]? processIds = null,
+        [Description("Exclude these PIDs")] int[]? excludeProcessIds = null,
+        [Description("Regex matched against process image file name / file path basename")] string? processNameRegex = null,
+        [Description("Regex matched against process image file name / file path basename — exclusion")] string? excludeProcessNameRegex = null,
+        [Description("Regex matched against the command line")] string? commandLineRegex = null,
+        [Description("Regex matched against the .NET ExceptionType (e.g. 'TaskCanceledException')")] string? exceptionTypeRegex = null,
+        [Description("Regex against the .NET ExceptionType — exclusion (e.g. '^System\\.OperationCanceledException$')")] string? excludeExceptionTypeRegex = null,
+        [Description("Regex matched against the exception message")] string? messageRegex = null,
+        [Description("Regex against the exception message — exclusion")] string? excludeMessageRegex = null,
+        [Description("Inclusive lower bound on exception timestamp (UTC, ISO 8601)")] DateTime? startTime = null,
+        [Description("Inclusive upper bound on exception timestamp (UTC, ISO 8601)")] DateTime? endTime = null,
+        [Description("Center of a time window. Combine with windowMs.")] DateTime? aroundTime = null,
+        [Description("Half-window in milliseconds around aroundTime. Default 5000 (10s window).")] double? windowMs = null,
+        [Description("Include each result's full stack trace inline (expensive). Default false.")] bool? includeStackTrace = null,
+        [Description("Number of leading results to skip (default 0)")] int? skip = null,
+        [Description("Maximum number of results to return (default 200, max 5000)")] int? maxResults = null) => Run(() =>
+    {
+        int offset = Math.Max(skip ?? 0, 0);
+        int take = Math.Clamp(maxResults ?? DefaultMaxResults, 1, MaxAllowedResults);
+        bool withStack = includeStackTrace ?? false;
+        if (aroundTime.HasValue && !windowMs.HasValue)
+        {
+            windowMs = 5000;
+        }
+
+        var entry = Cache.Load(path);
+        var filter = CompiledFilter.Build(
+            processIndices, excludeProcessIndices,
+            processIds, excludeProcessIds,
+            processNameRegex, excludeProcessNameRegex,
+            commandLineRegex,
+            exceptionTypeRegex, excludeExceptionTypeRegex,
+            messageRegex, excludeMessageRegex,
+            startTime, endTime, aroundTime, windowMs);
+
+        // Stop streaming once we have offset+take+1 hits, but still count the cap-hit flag.
+        int seen = 0;
+        int kept = 0;
+        var page = new List<ExceptionRef>(take);
+        bool capHit = false;
+        int hardLimit = offset + take;
+
+        foreach (var r in filter.FilterExceptions(entry))
+        {
+            seen++;
+            if (kept < hardLimit)
+            {
+                if (seen > offset)
+                {
+                    page.Add(r);
+                }
+
+                kept = seen <= offset ? 0 : page.Count;
+            }
+            else
+            {
+                capHit = true;
+                break;
+            }
+        }
+
+        var sb = new StringBuilder();
+        sb.Append("exceptions: ").Append(page.Count)
+          .Append(" (skip=").Append(offset)
+          .Append(", take=").Append(take)
+          .Append(", matched=").Append(seen);
+        if (capHit)
+        {
+            sb.Append('+');
+        }
+
+        sb.AppendLine(")");
+
+        if (page.Count == 0)
+        {
+            sb.AppendLine("(no exceptions match)");
+            return sb.ToString();
+        }
+
+        foreach (var r in page)
+        {
+            sb.AppendLine(Format.ExceptionLine(entry, r));
+            if (withStack)
+            {
+                var trace = entry.Session.ComputeStackTrace(r.Process, r.Exception);
+                if (!string.IsNullOrEmpty(trace))
+                {
+                    foreach (var line in trace.Split('\n'))
+                    {
+                        var trimmed = line.TrimEnd('\r');
+                        if (trimmed.Length > 0)
+                        {
+                            sb.Append("    ").AppendLine(trimmed);
+                        }
+                    }
+                }
+            }
+        }
+
+        return sb.ToString();
+    });
+
+    [McpServerTool(Name = "get_exception", ReadOnly = true, Idempotent = true)]
+    [Description(@"Returns one exception with its full managed stack trace. Pass id as 'pi/ei' (the suffix you saw in [pi/ei] brackets), e.g. '17/3'.")]
+    public static string GetException(
+        [Description("Absolute path to a .beetle file")] string path,
+        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string id) => Run(() =>
+    {
+        var entry = Cache.Load(path);
+        var (pi, ei) = ParseExceptionId(id);
+        var p = ResolveProcess(entry, pi);
+        if ((uint)ei >= (uint)p.Exceptions.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(id),
+                $"exceptionIndex {ei} is out of range. Process [{pi}] has {p.Exceptions.Count} exception(s).");
+        }
+
+        var ex = p.Exceptions[ei];
+
+        var sb = new StringBuilder();
+        sb.Append("process: ").AppendLine(Format.ProcessLine(pi, p));
+        sb.Append("exceptionId: ").Append(pi).Append('/').AppendLine(ei.ToString());
+        sb.Append("timestamp: ").AppendLine(Format.Iso(ex.Timestamp));
+        sb.Append("threadId: ").AppendLine(ex.ThreadId.ToString());
+        sb.Append("type: ").AppendLine(ex.ExceptionType ?? "<unknown>");
+        sb.Append("message: ").AppendLine(ex.ExceptionMessage ?? string.Empty);
+        sb.AppendLine("stackTrace:");
+        var trace = entry.Session.ComputeStackTrace(p, ex);
+        if (string.IsNullOrEmpty(trace))
+        {
+            sb.AppendLine("  (no stack captured)");
+        }
+        else
+        {
+            foreach (var line in trace.Split('\n'))
+            {
+                var trimmed = line.TrimEnd('\r');
+                if (trimmed.Length > 0)
+                {
+                    sb.Append("  ").AppendLine(trimmed);
+                }
+            }
+        }
+
+        return sb.ToString();
+    });
+
+    [McpServerTool(Name = "get_stack_trace", ReadOnly = true, Idempotent = true)]
+    [Description("Returns just the formatted managed stack trace for one exception. Lighter than get_exception when the type/message are already known.")]
+    public static string GetStackTrace(
+        [Description("Absolute path to a .beetle file")] string path,
+        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string id) => Run(() =>
+    {
+        var entry = Cache.Load(path);
+        var (pi, ei) = ParseExceptionId(id);
+        var p = ResolveProcess(entry, pi);
+        if ((uint)ei >= (uint)p.Exceptions.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(id),
+                $"exceptionIndex {ei} is out of range. Process [{pi}] has {p.Exceptions.Count} exception(s).");
+        }
+
+        var trace = entry.Session.ComputeStackTrace(p, p.Exceptions[ei]);
+        return string.IsNullOrEmpty(trace) ? "(no stack captured)" : trace;
+    });
+
+    [McpServerTool(Name = "exceptions_around_time", ReadOnly = true, Idempotent = true)]
+    [Description(@"Convenience over query_exceptions: return all exceptions within +/- windowMs of a target time, ordered by timestamp. Use this to correlate a .beetle with timestamps from an external test/CI log.")]
+    public static string ExceptionsAroundTime(
+        [Description("Absolute path to a .beetle file")] string path,
+        [Description("Target time (UTC, ISO 8601)")] DateTime aroundTime,
+        [Description("Half-window in milliseconds (default 5000 = 10s window)")] double? windowMs = null,
+        [Description("Optional regex on process image file name / file path basename")] string? processNameRegex = null,
+        [Description("Optional regex on exception type")] string? exceptionTypeRegex = null,
+        [Description("Maximum number of results (default 200, max 5000)")] int? maxResults = null) => Run(() =>
+    {
+        int take = Math.Clamp(maxResults ?? DefaultMaxResults, 1, MaxAllowedResults);
+        double half = windowMs ?? 5000;
+
+        var entry = Cache.Load(path);
+        var filter = CompiledFilter.Build(
+            null, null, null, null,
+            processNameRegex, null, null,
+            exceptionTypeRegex, null, null, null,
+            null, null, aroundTime, half);
+
+        var hits = filter.FilterExceptions(entry)
+            .OrderBy(r => r.Exception.Timestamp)
+            .Take(take + 1)
+            .ToList();
+        bool capHit = hits.Count > take;
+        if (capHit)
+        {
+            hits.RemoveAt(hits.Count - 1);
+        }
+
+        var sb = new StringBuilder();
+        sb.Append("around: ").AppendLine(Format.Iso(aroundTime));
+        sb.Append("window: +/-").Append(half.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)).AppendLine(" ms");
+        sb.Append("exceptions: ").Append(hits.Count);
+        if (capHit)
+        {
+            sb.Append('+');
+        }
+
+        sb.AppendLine();
+
+        if (hits.Count == 0)
+        {
+            sb.AppendLine("(no exceptions in window)");
+            return sb.ToString();
+        }
+
+        foreach (var r in hits)
+        {
+            sb.AppendLine(Format.ExceptionLine(entry, r));
+        }
+
+        return sb.ToString();
+    });
+
+    [McpServerTool(Name = "exceptions_before", ReadOnly = true, Idempotent = true)]
+    [Description(@"Returns the exceptions in the same process that occurred before a given exception, within an optional window. Use this for root-cause walk-back: 'this exception broke things — what fired in this process just before it?'")]
+    public static string ExceptionsBefore(
+        [Description("Absolute path to a .beetle file")] string path,
+        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string id,
+        [Description("Optional max look-back window in milliseconds (default unlimited within the process)")] double? withinMs = null,
+        [Description("Maximum number of preceding exceptions to return (default 50, max 5000)")] int? maxResults = null) => Run(() =>
+    {
+        int take = Math.Clamp(maxResults ?? 50, 1, MaxAllowedResults);
+        var entry = Cache.Load(path);
+        var (pi, ei) = ParseExceptionId(id);
+        var p = ResolveProcess(entry, pi);
+        if ((uint)ei >= (uint)p.Exceptions.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(id), $"exceptionIndex {ei} is out of range.");
+        }
+
+        var anchor = p.Exceptions[ei];
+        var lo = withinMs.HasValue ? anchor.Timestamp - TimeSpan.FromMilliseconds(withinMs.Value) : DateTime.MinValue;
+
+        var preceding = new List<ExceptionRef>();
+        for (int i = ei - 1; i >= 0 && preceding.Count < take; i--)
+        {
+            var ex = p.Exceptions[i];
+            if (ex.Timestamp < lo)
+            {
+                break;
+            }
+
+            preceding.Add(new ExceptionRef(pi, p, i, ex));
+        }
+
+        preceding.Reverse(); // chronological order
+
+        var sb = new StringBuilder();
+        sb.Append("anchor: ").AppendLine(Format.ExceptionLine(entry, new ExceptionRef(pi, p, ei, anchor)));
+        sb.Append("preceding: ").Append(preceding.Count);
+        if (withinMs.HasValue)
+        {
+            sb.Append(" (within ").Append(withinMs.Value.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)).Append(" ms)");
+        }
+
+        sb.AppendLine();
+        if (preceding.Count == 0)
+        {
+            sb.AppendLine("(none)");
+            return sb.ToString();
+        }
+
+        foreach (var r in preceding)
+        {
+            sb.AppendLine(Format.ExceptionLine(entry, r, includeProcessName: false));
+        }
+
+        return sb.ToString();
+    });
+
+    internal static (int pi, int ei) ParseExceptionId(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            throw new ArgumentException("Exception id is empty. Expected 'processIndex/exceptionIndex' (e.g. '17/3').", nameof(id));
+        }
+
+        int slash = id.IndexOf('/');
+        if (slash <= 0 || slash == id.Length - 1)
+        {
+            throw new ArgumentException(
+                $"Invalid exception id: '{id}'. Expected 'processIndex/exceptionIndex' (e.g. '17/3').", nameof(id));
+        }
+
+        if (!int.TryParse(id.AsSpan(0, slash), out int pi) ||
+            !int.TryParse(id.AsSpan(slash + 1), out int ei))
+        {
+            throw new ArgumentException(
+                $"Invalid exception id: '{id}'. Both parts must be integers.", nameof(id));
+        }
+
+        return (pi, ei);
+    }
+}
