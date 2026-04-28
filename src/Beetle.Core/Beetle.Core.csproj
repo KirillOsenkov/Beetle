@@ -10,7 +10,7 @@
   <PropertyGroup>
     <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
     <PackageId>Beetle.Core</PackageId>
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
     <Authors>Kirill Osenkov</Authors>
     <Company>Microsoft</Company>
     <Description>A library to read and write .beetle files (Binary-Encoded Event Tracing Log for Exceptions)</Description>
