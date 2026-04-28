@@ -22,6 +22,18 @@ PIDs are **reused** within a single recording (Windows recycles them quickly). D
 - The `get_process_tree` tool matches parents on `(parentPid, parentStartTimeRelativeMSec)` so reused PIDs don't cross-link. The same matching is used by `get_process_parent_chain` and `get_process_children`.
 - Ids are scoped to one `.beetle` file's bytes; reload a different file → discard the ids.
 
+## The `path` argument
+
+Every read tool accepts an optional `path` argument naming the `.beetle` to query. If you omit it, the tool uses the **most recently loaded / accessed** beetle in the cache. So a typical session looks like:
+
+```
+load_beetle <path>          # warms the cache, returns the summary
+list_processes              # implicit path
+count_exceptions ...        # implicit path
+```
+
+Pass `path` explicitly when you have multiple beetles loaded and want to switch, or when running diff workflows. The mutating tools — `load_beetle`, `reload_beetle`, `unload_beetle` — always require `path`. `diff_exceptions` requires both `leftPath` and `rightPath`.
+
 ## The core loop
 
 0. **Narrow down first.** On any unfamiliar file, start by identifying the small set of processes that actually matter for the question being asked, and ignore the rest. A .beetle typically contains hundreds of processes — OS background tasks, telemetry, log collectors, post-mortem dump tools — and lumping them together with the workload makes histograms and timelines misleading. Use `list_processes` (sorted by exceptions or duration) to find the workload-bearing process(es), then pass `processIndices=[pi,...]` to every subsequent tool. Only widen the scope if narrowing produced nothing useful.
@@ -52,9 +64,19 @@ All regexes are case-insensitive. All filters AND together. `aroundOffset` accep
 
 Tools vary in which subset of these they expose — `query_exceptions` and `bin_exceptions` are the most permissive; `list_processes` only has the process-side filters; `exceptions_around_time` is scoped to the around* form.
 
-## Output projection (query_exceptions / exceptions_around_time)
+## Output projection (query_exceptions / exceptions_around_time / list_modules)
 
-Pass `fields="timestamp,type,id"` (or any comma-separated subset of `timestamp,process,type,message,id`; aliases `ts`, `time`, `proc`, `msg`) to drop columns from each line. Default is the full line. Use this when you only need timestamps for binning, or only `[pi/ei]` ids to feed into `get_exception` — it cuts response size 5–10× on large dumps.
+Pass `fields="timestamp,type,id"` (or any comma-separated subset of `timestamp,process,type,message,id`; aliases `ts`, `time`, `proc`, `msg`) to drop columns from each exception line. `list_modules` accepts `fields="name,path"` (subset of `name,path,pdb,methods`). Default is the full line. Use this when you only need timestamps for binning, only `[pi/ei]` ids to feed into `get_exception`, or only module names to scan for an adapter — it cuts response size 5–10× on large dumps.
+
+## Modules and native images
+
+`list_modules` and `list_native_images` can dump hundreds of entries per process; almost all of them are framework / system noise. Cut it down:
+
+- `excludeFrameworkModules=true` — hides the GAC, WinSxS, System32, dotnet shared frameworks, and the process's own install directory.
+- `nameRegex` / `pathRegex` / `excludePathRegex` — case-insensitive regex filters.
+- `fields=name,path` — for `list_modules`, drop the GUID and method-count columns when you don't need them.
+
+For cross-process queries — "is module X loaded anywhere?" — use `find_module nameRegex=...` instead of looping `list_modules` per process.
 
 ## Counts vs samples
 
@@ -133,6 +155,13 @@ Sometimes the question is structural ("which child processes did `dotnet test.ex
 
 1. `get_process_tree <path> processNameRegex=dotnet minExceptionCount=1`.
 2. From the rendered tree, copy a `[pi]` and `query_exceptions <path> processIndices=[pi]`.
+
+### Identifying loaded test adapters / user assemblies
+You want to know what's running inside a `testhost.exe` (which adapter? which test DLL?) without scrolling 400 modules.
+
+1. `find_module nameRegex=mstest|xunit|nunit|testadapter` — adapter loaded across all processes, one row per hit.
+2. `list_modules <pi> excludeFrameworkModules=true fields=name,path` — strips the testhost's own install dir + the GAC, leaves user / product code.
+3. To go the other way ("is `Microsoft.PowerBI.Foo` ever loaded?"): `find_module nameRegex=^Microsoft\.PowerBI\.Foo$`.
 
 ## Output format reminders
 

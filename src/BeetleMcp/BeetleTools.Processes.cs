@@ -11,13 +11,25 @@ namespace BeetleMcp;
 
 public static partial class BeetleTools
 {
-    // A process is considered managed (.NET) if any of its loaded modules is the
-    // runtime's core library. Mirrors the heuristic used by the Beetle viewer.
-    private static readonly string[] ManagedRuntimeModuleNames =
+    // A process is considered managed (.NET) if it loaded the CLR runtime or
+    // its core library. The runtime core library is usually reported as a
+    // native image (NGen / R2R), not a managed module, so we have to check
+    // both lists. Mirrors the heuristic used by the Beetle viewer but extended
+    // to native images so .NET Core processes aren't misclassified.
+    private static readonly string[] ManagedModuleNames =
     {
         "mscorlib",
         "mscorlib.ni",
         "System.Private.CoreLib",
+    };
+
+    private static readonly string[] ManagedNativeImageBasenames =
+    {
+        "mscorlib.dll",
+        "mscorlib.ni.dll",
+        "System.Private.CoreLib.dll",
+        "coreclr.dll",
+        "clr.dll",
     };
 
     internal static bool IsManagedProcess(Process p)
@@ -30,9 +42,27 @@ public static partial class BeetleTools
                 continue;
             }
 
-            for (int i = 0; i < ManagedRuntimeModuleNames.Length; i++)
+            for (int i = 0; i < ManagedModuleNames.Length; i++)
             {
-                if (string.Equals(name, ManagedRuntimeModuleNames[i], StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(name, ManagedModuleNames[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
+        foreach (var im in p.NativeImages)
+        {
+            var fp = im.FilePath;
+            if (string.IsNullOrEmpty(fp))
+            {
+                continue;
+            }
+
+            var basename = System.IO.Path.GetFileName(fp);
+            for (int i = 0; i < ManagedNativeImageBasenames.Length; i++)
+            {
+                if (string.Equals(basename, ManagedNativeImageBasenames[i], StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }
@@ -52,7 +82,7 @@ processIndex (the [pi] in brackets) is the canonical handle — pass it to other
 
 Filters are AND-combined. Regexes are case-insensitive and matched against ImageFileName / FilePath basename / CommandLine.")]
     public static string ListProcesses(
-        [Description("Absolute path to a .beetle file")] string path,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
         [Description("Optional regex matched against the process image file name / file path basename")] string? processNameRegex = null,
         [Description("Optional regex matched against the process image file name / file path basename — exclusion")] string? excludeProcessNameRegex = null,
         [Description("Optional regex matched against the command line")] string? commandLineRegex = null,
@@ -69,7 +99,7 @@ Filters are AND-combined. Regexes are case-insensitive and matched against Image
     {
         int offset = Math.Max(skip ?? 0, 0);
         int take = Math.Clamp(maxResults ?? DefaultMaxResults, 1, MaxAllowedResults);
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
 
         var filter = CompiledFilter.Build(
             processIndices: null, excludeProcessIndices: null,
@@ -135,10 +165,10 @@ Filters are AND-combined. Regexes are case-insensitive and matched against Image
 
 processIndex is the canonical handle — get it from list_processes or query_exceptions output (the [pi] / [pi/ei] suffix).")]
     public static string GetProcess(
-        [Description("Absolute path to a .beetle file")] string path,
-        [Description("processIndex (the number in [pi] brackets), 0-based")] int processIndex) => Run(() =>
+        [Description("processIndex (the number in [pi] brackets), 0-based")] int processIndex,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null) => Run(() =>
     {
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var p = ResolveProcess(entry, processIndex);
 
         var sb = new StringBuilder();
@@ -182,12 +212,12 @@ processIndex is the canonical handle — get it from list_processes or query_exc
 
 Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doesn't cross-link unrelated processes.")]
     public static string GetProcessTree(
-        [Description("Absolute path to a .beetle file")] string path,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
         [Description("Optional regex to limit which processes (and their descendants) are shown")] string? processNameRegex = null,
         [Description("Optional: only show subtrees that contain at least N exceptions")] int? minExceptionCount = null,
         [Description("Optional: only show subtrees that contain at least one managed (.NET) process. Useful for hiding the OS/agent noise.")] bool? managedOnly = null) => Run(() =>
     {
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var s = entry.Session;
         var processes = s.Processes;
 
@@ -360,24 +390,64 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
     });
 
     [McpServerTool(Name = "list_modules", ReadOnly = true, Idempotent = true)]
-    [Description("Lists managed modules (assemblies) loaded in a process. Each line: 'name  filePath  pdbGuid  methods=N'.")]
+    [Description(@"Lists managed modules (assemblies) loaded in a process. Each line is tab-separated. Default columns: 'name  filePath  pdbGuid  methods=N'.
+
+Tips for cutting noise:
+  - excludeFrameworkModules=true hides the GAC, WinSxS / System32, dotnet shared frameworks, and the process's own install directory — leaves user / product code.
+  - nameRegex / pathRegex / excludePathRegex (case-insensitive) for surgical filters.
+  - fields=name,path (or any subset of name,path,pdb,methods) trims columns when you only need names.
+
+For 'is module X loaded anywhere?' across all processes, use find_module instead.")]
     public static string ListModules(
-        [Description("Absolute path to a .beetle file")] string path,
         [Description("processIndex (the number in [pi] brackets)")] int processIndex,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
         [Description("Optional case-insensitive substring filter on file path")] string? pathFilter = null,
+        [Description("Optional regex on the module name (Module.Name)")] string? nameRegex = null,
+        [Description("Optional regex on the module's file path")] string? pathRegex = null,
+        [Description("Optional regex on the module's file path — exclusion")] string? excludePathRegex = null,
+        [Description("If true, hide framework / system modules (GAC, WinSxS / System32, dotnet shared frameworks, the process's own install directory). Default false.")] bool? excludeFrameworkModules = null,
+        [Description("Comma-separated subset of 'name,path,pdb,methods'. Default: all.")] string? fields = null,
         [Description("Number of leading entries to skip (default 0)")] int? skip = null,
         [Description("Maximum number of entries to return (default 200, max 5000)")] int? maxResults = null) => Run(() =>
     {
         int offset = Math.Max(skip ?? 0, 0);
         int take = Math.Clamp(maxResults ?? DefaultMaxResults, 1, MaxAllowedResults);
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var p = ResolveProcess(entry, processIndex);
+
+        var nameRx = CompileOpt(nameRegex);
+        var pathRx = CompileOpt(pathRegex);
+        var excludePathRx = CompileOpt(excludePathRegex);
+        bool hideFx = excludeFrameworkModules ?? false;
+        string? processInstallDir = hideFx ? GetInstallDirectory(p) : null;
+
+        var projected = ParseModuleFields(fields);
 
         IEnumerable<Module> modules = p.Modules;
         if (!string.IsNullOrEmpty(pathFilter))
         {
             modules = modules.Where(m => m.FilePath != null &&
                 m.FilePath.IndexOf(pathFilter, StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        if (nameRx != null)
+        {
+            modules = modules.Where(m => m.Name != null && nameRx.IsMatch(m.Name));
+        }
+
+        if (pathRx != null)
+        {
+            modules = modules.Where(m => m.FilePath != null && pathRx.IsMatch(m.FilePath));
+        }
+
+        if (excludePathRx != null)
+        {
+            modules = modules.Where(m => m.FilePath == null || !excludePathRx.IsMatch(m.FilePath));
+        }
+
+        if (hideFx)
+        {
+            modules = modules.Where(m => !IsFrameworkPath(m.FilePath, processInstallDir));
         }
 
         var ordered = modules
@@ -397,34 +467,150 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
 
         foreach (var m in page)
         {
-            sb.Append(m.Name ?? "<null>").Append('\t')
-              .Append(m.FilePath ?? "<null>").Append('\t')
-              .Append(m.PdbGuid == Guid.Empty ? "<no-pdb>" : m.PdbGuid.ToString()).Append('\t')
-              .Append("methods=").Append(m.Methods.Count).AppendLine();
+            AppendModuleLine(sb, m, projected);
+        }
+
+        return sb.ToString();
+    });
+
+    [McpServerTool(Name = "find_module", ReadOnly = true, Idempotent = true)]
+    [Description(@"Searches for managed modules (by name or file path) across processes. One row per (process, module) match:
+  [pi] <processName> pid=N  <moduleName>  <modulePath>
+
+Use this to answer 'is X loaded anywhere?' without dumping all modules per process. Scope with processIndices when you already know the workload.")]
+    public static string FindModule(
+        [Description("Regex on the module name (Module.Name)")] string? nameRegex = null,
+        [Description("Regex on the module's file path")] string? pathRegex = null,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
+        [Description("Restrict to these processIndex values")] int[]? processIndices = null,
+        [Description("Optional regex matched against the process image file name / file path basename")] string? processNameRegex = null,
+        [Description("Number of leading entries to skip (default 0)")] int? skip = null,
+        [Description("Maximum number of entries to return (default 500, max 5000)")] int? maxResults = null) => Run(() =>
+    {
+        if (string.IsNullOrEmpty(nameRegex) && string.IsNullOrEmpty(pathRegex))
+        {
+            throw new ModelContextProtocol.McpException(
+                "find_module requires at least one of nameRegex or pathRegex.");
+        }
+
+        int offset = Math.Max(skip ?? 0, 0);
+        int take = Math.Clamp(maxResults ?? 500, 1, MaxAllowedResults);
+        var entry = ResolveBeetle(path);
+        var processes = entry.Session.Processes;
+
+        var nameRx = CompileOpt(nameRegex);
+        var pathRx = CompileOpt(pathRegex);
+        var procNameRx = CompiledFilter.CompileProcessNameRegex(processNameRegex);
+        var indexFilter = processIndices is { Length: > 0 } ? new HashSet<int>(processIndices) : null;
+
+        var hits = new List<(int pi, Process p, Module m)>();
+        for (int i = 0; i < processes.Count; i++)
+        {
+            if (indexFilter != null && !indexFilter.Contains(i))
+            {
+                continue;
+            }
+
+            var proc = processes[i];
+            if (procNameRx != null && !CompiledFilter.ProcessNameMatches(procNameRx, proc))
+            {
+                continue;
+            }
+
+            foreach (var m in proc.Modules)
+            {
+                if (nameRx != null)
+                {
+                    if (m.Name == null || !nameRx.IsMatch(m.Name))
+                    {
+                        continue;
+                    }
+                }
+
+                if (pathRx != null)
+                {
+                    if (m.FilePath == null || !pathRx.IsMatch(m.FilePath))
+                    {
+                        continue;
+                    }
+                }
+
+                hits.Add((i, proc, m));
+            }
+        }
+
+        int total = hits.Count;
+        var page = hits.Skip(offset).Take(take).ToList();
+
+        var sb = new StringBuilder();
+        sb.Append("matches: ").Append(page.Count)
+          .Append(" (skip=").Append(offset)
+          .Append(", take=").Append(take)
+          .Append(", matched=").Append(total)
+          .AppendLine(")");
+
+        if (page.Count == 0)
+        {
+            sb.AppendLine("(no modules match)");
+            return sb.ToString();
+        }
+
+        foreach (var (pi, proc, m) in page)
+        {
+            sb.Append('[').Append(pi).Append("] ")
+              .Append(Format.ProcessName(proc))
+              .Append(" pid=").Append(proc.Id)
+              .Append('\t').Append(m.Name ?? "<null>")
+              .Append('\t').AppendLine(m.FilePath ?? "<null>");
         }
 
         return sb.ToString();
     });
 
     [McpServerTool(Name = "list_native_images", ReadOnly = true, Idempotent = true)]
-    [Description("Lists native images (DLLs/EXEs) loaded into a process's address space. Each line: 'filePath  startAddress  size'.")]
+    [Description(@"Lists native images (DLLs/EXEs) loaded into a process's address space. Each line: 'filePath  startAddress  size'.
+
+excludeFrameworkModules=true hides Windows / dotnet shared / WinSxS / process-install-dir entries.")]
     public static string ListNativeImages(
-        [Description("Absolute path to a .beetle file")] string path,
         [Description("processIndex (the number in [pi] brackets)")] int processIndex,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
         [Description("Optional case-insensitive substring filter on file path")] string? pathFilter = null,
+        [Description("Optional regex on the image's file path")] string? pathRegex = null,
+        [Description("Optional regex on the image's file path — exclusion")] string? excludePathRegex = null,
+        [Description("If true, hide framework / system images (Windows, dotnet shared, WinSxS, the process's own install directory). Default false.")] bool? excludeFrameworkModules = null,
         [Description("Number of leading entries to skip (default 0)")] int? skip = null,
         [Description("Maximum number of entries to return (default 200, max 5000)")] int? maxResults = null) => Run(() =>
     {
         int offset = Math.Max(skip ?? 0, 0);
         int take = Math.Clamp(maxResults ?? DefaultMaxResults, 1, MaxAllowedResults);
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var p = ResolveProcess(entry, processIndex);
+
+        var pathRx = CompileOpt(pathRegex);
+        var excludePathRx = CompileOpt(excludePathRegex);
+        bool hideFx = excludeFrameworkModules ?? false;
+        string? processInstallDir = hideFx ? GetInstallDirectory(p) : null;
 
         IEnumerable<Image> images = p.NativeImages;
         if (!string.IsNullOrEmpty(pathFilter))
         {
             images = images.Where(im => im.FilePath != null &&
                 im.FilePath.IndexOf(pathFilter, StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        if (pathRx != null)
+        {
+            images = images.Where(im => im.FilePath != null && pathRx.IsMatch(im.FilePath));
+        }
+
+        if (excludePathRx != null)
+        {
+            images = images.Where(im => im.FilePath == null || !excludePathRx.IsMatch(im.FilePath));
+        }
+
+        if (hideFx)
+        {
+            images = images.Where(im => !IsFrameworkPath(im.FilePath, processInstallDir));
         }
 
         var ordered = images
@@ -452,16 +638,160 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
         return sb.ToString();
     });
 
+    private static Regex? CompileOpt(string? pattern) =>
+        string.IsNullOrEmpty(pattern)
+            ? null
+            : new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    [Flags]
+    private enum ModuleFields
+    {
+        Name = 1 << 0,
+        Path = 1 << 1,
+        Pdb = 1 << 2,
+        Methods = 1 << 3,
+        All = Name | Path | Pdb | Methods,
+    }
+
+    private static ModuleFields ParseModuleFields(string? fields)
+    {
+        if (string.IsNullOrWhiteSpace(fields))
+        {
+            return ModuleFields.All;
+        }
+
+        ModuleFields result = 0;
+        foreach (var raw in fields.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            result |= raw.ToLowerInvariant() switch
+            {
+                "name" => ModuleFields.Name,
+                "path" or "filepath" => ModuleFields.Path,
+                "pdb" or "pdbguid" => ModuleFields.Pdb,
+                "methods" or "methodcount" => ModuleFields.Methods,
+                _ => throw new ModelContextProtocol.McpException(
+                    $"Unknown field '{raw}'. Expected one of: name, path, pdb, methods."),
+            };
+        }
+
+        if (result == 0)
+        {
+            return ModuleFields.All;
+        }
+
+        return result;
+    }
+
+    private static void AppendModuleLine(StringBuilder sb, Module m, ModuleFields fields)
+    {
+        bool first = true;
+        void Tab()
+        {
+            if (!first)
+            {
+                sb.Append('\t');
+            }
+
+            first = false;
+        }
+
+        if ((fields & ModuleFields.Name) != 0)
+        {
+            Tab();
+            sb.Append(m.Name ?? "<null>");
+        }
+
+        if ((fields & ModuleFields.Path) != 0)
+        {
+            Tab();
+            sb.Append(m.FilePath ?? "<null>");
+        }
+
+        if ((fields & ModuleFields.Pdb) != 0)
+        {
+            Tab();
+            sb.Append(m.PdbGuid == Guid.Empty ? "<no-pdb>" : m.PdbGuid.ToString());
+        }
+
+        if ((fields & ModuleFields.Methods) != 0)
+        {
+            Tab();
+            sb.Append("methods=").Append(m.Methods.Count);
+        }
+
+        sb.AppendLine();
+    }
+
+    // Substring tests that identify framework / system module paths. Match is
+    // case-insensitive and looks for the segment anywhere in the path so we
+    // pick up both 'C:\Windows\...' and '\Device\HarddiskVolumeN\Windows\...'.
+    private static readonly string[] FrameworkPathSegments =
+    {
+        @"\Windows\Microsoft.Net\assembly\",
+        @"\Windows\Microsoft.NET\Framework\",
+        @"\Windows\Microsoft.NET\Framework64\",
+        @"\Windows\WinSxS\",
+        @"\Windows\System32\",
+        @"\Windows\SysWOW64\",
+        @"\Windows\assembly\",
+        @"\dotnet\shared\Microsoft.NETCore.App\",
+        @"\dotnet\shared\Microsoft.AspNetCore.App\",
+        @"\dotnet\shared\Microsoft.WindowsDesktop.App\",
+        @"\dotnet\host\",
+    };
+
+    private static bool IsFrameworkPath(string? filePath, string? processInstallDir)
+    {
+        if (string.IsNullOrEmpty(filePath))
+        {
+            return false;
+        }
+
+        for (int i = 0; i < FrameworkPathSegments.Length; i++)
+        {
+            if (filePath.IndexOf(FrameworkPathSegments[i], StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(processInstallDir) &&
+            filePath.StartsWith(processInstallDir, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string? GetInstallDirectory(Process p)
+    {
+        var fp = p.FilePath;
+        if (string.IsNullOrEmpty(fp))
+        {
+            return null;
+        }
+
+        try
+        {
+            return System.IO.Path.GetDirectoryName(fp);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     [McpServerTool(Name = "get_process_parent_chain", ReadOnly = true, Idempotent = true)]
     [Description(@"Returns the chain of ancestor processes for a given process, from the recorded root down to the target. Each line is one process, indented by depth:
   name pid=N [exitCode=E] exceptions=N [pi]
 
 The last (most-indented) line is the target. Useful for answering 'who started this process?' without manually walking parent links. Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse can't cross-link unrelated processes. If the parent isn't recorded in the session the chain stops there.")]
     public static string GetProcessParentChain(
-        [Description("Absolute path to a .beetle file")] string path,
-        [Description("processIndex (the [pi] number) of the process whose parent chain you want")] int processIndex) => Run(() =>
+        [Description("processIndex (the [pi] number) of the process whose parent chain you want")] int processIndex,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null) => Run(() =>
     {
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var processes = entry.Session.Processes;
         ResolveProcess(entry, processIndex);
 
@@ -529,8 +859,8 @@ The last (most-indented) line is the target. Useful for answering 'who started t
 
 Children are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse can't cross-link unrelated processes. Filters apply only to descendants — the parent line is always shown for context.")]
     public static string GetProcessChildren(
-        [Description("Absolute path to a .beetle file")] string path,
         [Description("processIndex (the [pi] number) of the parent process whose children you want")] int processIndex,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
         [Description("If true, include the entire descendant subtree (indented). If false (default), only direct children.")] bool? recursive = null,
         [Description("Optional regex filter on descendant ImageFileName / FilePath basename")] string? processNameRegex = null,
         [Description("Number of leading entries to skip (default 0)")] int? skip = null,
@@ -540,7 +870,7 @@ Children are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse ca
         int take = Math.Clamp(maxResults ?? DefaultMaxResults, 1, MaxAllowedResults);
         bool deep = recursive ?? false;
 
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var processes = entry.Session.Processes;
         var parent = ResolveProcess(entry, processIndex);
 

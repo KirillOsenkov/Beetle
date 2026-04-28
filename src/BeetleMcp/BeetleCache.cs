@@ -155,6 +155,27 @@ public sealed class BeetleCache
         }
     }
 
+    /// <summary>
+    /// Returns the most-recently-accessed cached entry, or null if the cache is empty.
+    /// Used by tools that accept an implicit path argument.
+    /// </summary>
+    public LoadedBeetle? TryGetMostRecent()
+    {
+        lock (syncRoot)
+        {
+            LoadedBeetle? best = null;
+            foreach (var e in entries.Values)
+            {
+                if (best == null || e.LastAccessedUtc > best.LastAccessedUtc)
+                {
+                    best = e;
+                }
+            }
+
+            return best;
+        }
+    }
+
     // Caller holds syncRoot.
     private void EvictToFit(long incoming)
     {

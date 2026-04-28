@@ -52,8 +52,8 @@ public static partial class BeetleTools
     [McpServerTool(Name = "get_session_summary", ReadOnly = true, Idempotent = true)]
     [Description(@"Returns a one-page overview of a loaded .beetle session: file size, recording window (start / end / duration), events lost, total processes, total exceptions, and the count of distinct exception types. Always cheap — call this first on any unfamiliar file.")]
     public static string GetSessionSummary(
-        [Description("Absolute path to a .beetle file")] string path)
-        => Run(() => Describe(Cache.Load(path)));
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null)
+        => Run(() => Describe(ResolveBeetle(path)));
 
     private static string Describe(LoadedBeetle entry)
     {

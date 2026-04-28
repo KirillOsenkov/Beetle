@@ -57,7 +57,7 @@ If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K
         bool withStack = includeStackTrace ?? false;
         var projected = Format.ParseExceptionFields(fields);
 
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var resolvedAround = ResolveAroundTime(entry, aroundTime, aroundOffset);
         if (resolvedAround.HasValue && !windowMs.HasValue)
         {
@@ -142,10 +142,10 @@ If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K
     [McpServerTool(Name = "get_exception", ReadOnly = true, Idempotent = true)]
     [Description(@"Returns one exception with its full managed stack trace. Pass id as 'pi/ei' (the suffix you saw in [pi/ei] brackets), e.g. '17/3'.")]
     public static string GetException(
-        [Description("Absolute path to a .beetle file")] string path,
-        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string exceptionId) => Run(() =>
+        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string exceptionId,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null) => Run(() =>
     {
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var (pi, ei) = ParseExceptionId(exceptionId);
         var p = ResolveProcess(entry, pi);
         if ((uint)ei >= (uint)p.Exceptions.Count)
@@ -187,10 +187,10 @@ If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K
     [McpServerTool(Name = "get_stack_trace", ReadOnly = true, Idempotent = true)]
     [Description("Returns just the formatted managed stack trace for one exception. Lighter than get_exception when the type/message are already known.")]
     public static string GetStackTrace(
-        [Description("Absolute path to a .beetle file")] string path,
-        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string exceptionId) => Run(() =>
+        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string exceptionId,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null) => Run(() =>
     {
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var (pi, ei) = ParseExceptionId(exceptionId);
         var p = ResolveProcess(entry, pi);
         if ((uint)ei >= (uint)p.Exceptions.Count)
@@ -208,7 +208,7 @@ If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K
 
 Provide either aroundTime (absolute UTC) or aroundOffset (relative to session start, e.g. '30m', '+1800s'). Filters mirror query_exceptions.")]
     public static string ExceptionsAroundTime(
-        [Description("Absolute path to a .beetle file")] string path,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
         [Description("Target time (UTC, ISO 8601). Provide this OR aroundOffset.")] DateTime? aroundTime = null,
         [Description("Target time as offset from session start, e.g. '30m', '+1800s'. Provide this OR aroundTime.")] string? aroundOffset = null,
         [Description("Half-window in milliseconds (default 5000 = 10s window)")] double? windowMs = null,
@@ -227,7 +227,7 @@ Provide either aroundTime (absolute UTC) or aroundOffset (relative to session st
         double half = windowMs ?? 5000;
         var projected = Format.ParseExceptionFields(fields);
 
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var resolvedAround = ResolveAroundTime(entry, aroundTime, aroundOffset)
             ?? throw new ModelContextProtocol.McpException(
                 "exceptions_around_time requires either aroundTime (absolute UTC) or aroundOffset (offset from session start).");
@@ -272,13 +272,13 @@ Provide either aroundTime (absolute UTC) or aroundOffset (relative to session st
     [McpServerTool(Name = "exceptions_before", ReadOnly = true, Idempotent = true)]
     [Description(@"Returns the exceptions in the same process that occurred before a given exception, within an optional window. Use this for root-cause walk-back: 'this exception broke things — what fired in this process just before it?'")]
     public static string ExceptionsBefore(
-        [Description("Absolute path to a .beetle file")] string path,
         [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string exceptionId,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
         [Description("Optional max look-back window in milliseconds (default unlimited within the process)")] double? withinMs = null,
         [Description("Maximum number of preceding exceptions to return (default 50, max 5000)")] int? maxResults = null) => Run(() =>
     {
         int take = Math.Clamp(maxResults ?? 50, 1, MaxAllowedResults);
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var (pi, ei) = ParseExceptionId(exceptionId);
         var p = ResolveProcess(entry, pi);
         if ((uint)ei >= (uint)p.Exceptions.Count)

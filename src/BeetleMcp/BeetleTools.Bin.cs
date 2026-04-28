@@ -18,7 +18,7 @@ binSize accepts a duration like '1m', '30s', '500ms', '1h'. A bare number is int
 
 Empty buckets between the first and last non-empty bucket are emitted with count 0 so the timeline reads naturally.")]
     public static string BinExceptions(
-        [Description("Absolute path to a .beetle file")] string path,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
         [Description("Bucket size, e.g. '1m', '30s', '500ms'. Default '60s'.")] string? binSize = null,
         [Description("Restrict to these processIndex values")] int[]? processIndices = null,
         [Description("Exclude these processIndex values")] int[]? excludeProcessIndices = null,
@@ -40,7 +40,7 @@ Empty buckets between the first and last non-empty bucket are emitted with count
 
         int take = Math.Clamp(maxResults ?? 500, 1, MaxAllowedResults);
 
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var filter = CompiledFilter.Build(
             processIndices, excludeProcessIndices, null, null,
             processNameRegex, excludeProcessNameRegex, null,

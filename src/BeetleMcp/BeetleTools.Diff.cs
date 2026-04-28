@@ -38,7 +38,7 @@ Output:
 
 Filters mirror query_exceptions but the output is a histogram, not individual events.")]
     public static string CountExceptions(
-        [Description("Absolute path to a .beetle file")] string path,
+        [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
         [Description("Histogram grouping: 'type' (default), 'type+message', or 'message'")] string? groupBy = null,
         [Description("Restrict to these processIndex values")] int[]? processIndices = null,
         [Description("Exclude these processIndex values")] int[]? excludeProcessIndices = null,
@@ -56,7 +56,7 @@ Filters mirror query_exceptions but the output is a histogram, not individual ev
     {
         int take = Math.Clamp(maxResults ?? 500, 1, MaxAllowedResults);
         var grouping = ParseGrouping(groupBy);
-        var entry = Cache.Load(path);
+        var entry = ResolveBeetle(path);
         var resolvedAround = ResolveAroundTime(entry, aroundTime, aroundOffset);
         if (resolvedAround.HasValue && !windowMs.HasValue)
         {
