@@ -11,6 +11,37 @@ namespace BeetleMcp;
 
 public static partial class BeetleTools
 {
+    // A process is considered managed (.NET) if any of its loaded modules is the
+    // runtime's core library. Mirrors the heuristic used by the Beetle viewer.
+    private static readonly string[] ManagedRuntimeModuleNames =
+    {
+        "mscorlib",
+        "mscorlib.ni",
+        "System.Private.CoreLib",
+    };
+
+    internal static bool IsManagedProcess(Process p)
+    {
+        foreach (var m in p.Modules)
+        {
+            var name = m.Name;
+            if (string.IsNullOrEmpty(name))
+            {
+                continue;
+            }
+
+            for (int i = 0; i < ManagedRuntimeModuleNames.Length; i++)
+            {
+                if (string.Equals(name, ManagedRuntimeModuleNames[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     [McpServerTool(Name = "list_processes", ReadOnly = true, Idempotent = true)]
     [Description(@"Lists processes recorded in a .beetle, with optional filtering and paging. Each line:
   startTime  name  pid=N  exitCode=E  durationMs=D  exceptions=N  [pi]
@@ -31,6 +62,7 @@ Filters are AND-combined. Regexes are case-insensitive and matched against Image
         [Description("Optional: only include processes that have at least N exceptions")] int? minExceptionCount = null,
         [Description("Optional: only include processes whose recorded duration (StopTime-StartTime) is at least this many ms. Processes still running at session end are excluded.")] double? minDurationMs = null,
         [Description("Optional: only include processes that did NOT exit cleanly (exitCode != 0 OR still running at session end). Useful when looking for killed/timed-out processes.")] bool? notExitedCleanly = null,
+        [Description("Optional: filter by managed-ness. true = only managed (.NET) processes (those that loaded mscorlib / System.Private.CoreLib); false = only unmanaged; null = both. Note: a process that crashed before loading the runtime can look unmanaged.")] bool? managed = null,
         [Description("Sort order: 'startTime' (default), 'exceptions', 'duration', 'name'")] string? sortBy = null,
         [Description("Number of leading entries to skip (default 0)")] int? skip = null,
         [Description("Maximum number of entries to return (default 200, max 5000)")] int? maxResults = null) => Run(() =>
@@ -60,6 +92,7 @@ Filters are AND-combined. Regexes are case-insensitive and matched against Image
             .Where(t => !minExceptionCount.HasValue || t.process.Exceptions.Count >= minExceptionCount.Value)
             .Where(t => !minDurationMs.HasValue || Duration(t.process) >= minDurationMs.Value)
             .Where(t => !(notExitedCleanly ?? false) || !ExitedCleanly(t.process))
+            .Where(t => !managed.HasValue || IsManagedProcess(t.process) == managed.Value)
             .ToList();
 
         IEnumerable<(int pi, Process p)> ordered = (sortBy ?? "startTime").ToLowerInvariant() switch
@@ -137,6 +170,7 @@ processIndex is the canonical handle — get it from list_processes or query_exc
             sb.AppendLine("stopTime: <still running at session end>");
         }
 
+        sb.Append("managed: ").AppendLine(IsManagedProcess(p) ? "true" : "false");
         sb.Append("modules: ").AppendLine(p.Modules.Count.ToString());
         sb.Append("nativeImages: ").AppendLine(p.NativeImages.Count.ToString());
         sb.Append("exceptions: ").Append(p.Exceptions.Count);
@@ -150,7 +184,8 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
     public static string GetProcessTree(
         [Description("Absolute path to a .beetle file")] string path,
         [Description("Optional regex to limit which processes (and their descendants) are shown")] string? processNameRegex = null,
-        [Description("Optional: only show subtrees that contain at least N exceptions")] int? minExceptionCount = null) => Run(() =>
+        [Description("Optional: only show subtrees that contain at least N exceptions")] int? minExceptionCount = null,
+        [Description("Optional: only show subtrees that contain at least one managed (.NET) process. Useful for hiding the OS/agent noise.")] bool? managedOnly = null) => Run(() =>
     {
         var entry = Cache.Load(path);
         var s = entry.Session;
@@ -206,12 +241,44 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
             }
         }
 
+        // Subtree managed marker — only needed when managedOnly is set.
+        bool[]? subtreeHasManaged = null;
+        if (managedOnly == true)
+        {
+            subtreeHasManaged = new bool[processes.Count];
+            bool ComputeManaged(int i)
+            {
+                bool any = IsManagedProcess(processes[i]);
+                if (children[i] is { } cs)
+                {
+                    foreach (var c in cs)
+                    {
+                        if (ComputeManaged(c))
+                        {
+                            any = true;
+                        }
+                    }
+                }
+
+                subtreeHasManaged[i] = any;
+                return any;
+            }
+
+            foreach (var r in roots)
+            {
+                ComputeManaged(r);
+            }
+        }
+
         Regex? nameRx = CompiledFilter.CompileProcessNameRegex(processNameRegex);
 
         bool MatchesName(int i) => nameRx == null || CompiledFilter.ProcessNameMatches(nameRx, processes[i]);
 
         bool MeetsMinCount(int i) =>
             subtreeExceptions == null || subtreeExceptions[i] >= minExceptionCount!.Value;
+
+        bool MeetsManaged(int i) =>
+            subtreeHasManaged == null || subtreeHasManaged[i];
 
         // Does this subtree contain any name-matching node? Only consulted when
         // a name regex is in use; collapses to "always true" otherwise.
@@ -242,6 +309,11 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
         {
             // minExceptionCount prunes the subtree structurally regardless of name matching.
             if (!MeetsMinCount(i))
+            {
+                return;
+            }
+
+            if (!MeetsManaged(i))
             {
                 return;
             }
