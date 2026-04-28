@@ -143,14 +143,14 @@ If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K
     [Description(@"Returns one exception with its full managed stack trace. Pass id as 'pi/ei' (the suffix you saw in [pi/ei] brackets), e.g. '17/3'.")]
     public static string GetException(
         [Description("Absolute path to a .beetle file")] string path,
-        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string id) => Run(() =>
+        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string exceptionId) => Run(() =>
     {
         var entry = Cache.Load(path);
-        var (pi, ei) = ParseExceptionId(id);
+        var (pi, ei) = ParseExceptionId(exceptionId);
         var p = ResolveProcess(entry, pi);
         if ((uint)ei >= (uint)p.Exceptions.Count)
         {
-            throw new ArgumentOutOfRangeException(nameof(id),
+            throw new ArgumentOutOfRangeException(nameof(exceptionId),
                 $"exceptionIndex {ei} is out of range. Process [{pi}] has {p.Exceptions.Count} exception(s).");
         }
 
@@ -188,14 +188,14 @@ If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K
     [Description("Returns just the formatted managed stack trace for one exception. Lighter than get_exception when the type/message are already known.")]
     public static string GetStackTrace(
         [Description("Absolute path to a .beetle file")] string path,
-        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string id) => Run(() =>
+        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string exceptionId) => Run(() =>
     {
         var entry = Cache.Load(path);
-        var (pi, ei) = ParseExceptionId(id);
+        var (pi, ei) = ParseExceptionId(exceptionId);
         var p = ResolveProcess(entry, pi);
         if ((uint)ei >= (uint)p.Exceptions.Count)
         {
-            throw new ArgumentOutOfRangeException(nameof(id),
+            throw new ArgumentOutOfRangeException(nameof(exceptionId),
                 $"exceptionIndex {ei} is out of range. Process [{pi}] has {p.Exceptions.Count} exception(s).");
         }
 
@@ -273,17 +273,17 @@ Provide either aroundTime (absolute UTC) or aroundOffset (relative to session st
     [Description(@"Returns the exceptions in the same process that occurred before a given exception, within an optional window. Use this for root-cause walk-back: 'this exception broke things — what fired in this process just before it?'")]
     public static string ExceptionsBefore(
         [Description("Absolute path to a .beetle file")] string path,
-        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string id,
+        [Description("Exception id in 'processIndex/exceptionIndex' form (e.g. '17/3')")] string exceptionId,
         [Description("Optional max look-back window in milliseconds (default unlimited within the process)")] double? withinMs = null,
         [Description("Maximum number of preceding exceptions to return (default 50, max 5000)")] int? maxResults = null) => Run(() =>
     {
         int take = Math.Clamp(maxResults ?? 50, 1, MaxAllowedResults);
         var entry = Cache.Load(path);
-        var (pi, ei) = ParseExceptionId(id);
+        var (pi, ei) = ParseExceptionId(exceptionId);
         var p = ResolveProcess(entry, pi);
         if ((uint)ei >= (uint)p.Exceptions.Count)
         {
-            throw new ArgumentOutOfRangeException(nameof(id), $"exceptionIndex {ei} is out of range.");
+            throw new ArgumentOutOfRangeException(nameof(exceptionId), $"exceptionIndex {ei} is out of range.");
         }
 
         var anchor = p.Exceptions[ei];
