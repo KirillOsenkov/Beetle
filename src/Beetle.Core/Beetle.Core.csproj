@@ -17,7 +17,7 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/KirillOsenkov/Beetle</PackageProjectUrl>
     <PackageReadmeFile>readme.md</PackageReadmeFile>
-    <IconFilePath>$(MSBuildThisFileDirectory)..\Beetle\icon.png</IconFilePath>
+    <IconFilePath>icon.png</IconFilePath>
     <PackageIcon>icon.png</PackageIcon>
     <RepositoryUrl>https://github.com/KirillOsenkov/Beetle</RepositoryUrl>
     <PackageTags>.NET dotnet ETL ETW perfview log trace exception exceptions record recorder assembly</PackageTags>
@@ -28,8 +28,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="..\Beetle\readme.md" Pack="true" PackagePath="\" />
-    <None Include="..\Beetle\icon.png" Pack="true" PackagePath="\" />
+    <None Include="..\..\readme.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 </Project>

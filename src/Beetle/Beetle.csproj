@@ -26,7 +26,7 @@
     <PackageReadmeFile>readme.md</PackageReadmeFile>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/KirillOsenkov/Beetle</PackageProjectUrl>
-    <IconFilePath>$(MSBuildThisFileDirectory)icon.png</IconFilePath>
+    <IconFilePath>icon.png</IconFilePath>
     <PackageIcon>icon.png</PackageIcon>
     <RepositoryUrl>https://github.com/KirillOsenkov/Beetle</RepositoryUrl>
     <PackageTags>.NET dotnet ETW etl trace log exception error logging record recorder assembly</PackageTags>
@@ -37,8 +37,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="readme.md" Pack="true" PackagePath="\" />
-    <None Include="icon.png" Pack="true" PackagePath="\" />
+    <None Include="..\..\readme.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
   </ItemGroup>
 
   <ItemGroup>
