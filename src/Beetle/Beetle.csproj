@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <DebugType>embedded</DebugType>
+    <LangVersion>latest</LangVersion>
+    <OutputType>Exe</OutputType>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <RollForward>Major</RollForward>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <SelfContained>False</SelfContained>
+    <PublishSingleFile>True</PublishSingleFile>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AssemblyName>beetle</AssemblyName>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Version>1.0.3</Version>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>beetle</ToolCommandName>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+    <PackageId>beetle</PackageId>
+    <Authors>Kirill Osenkov</Authors>
+    <Company>Microsoft</Company>
+    <Description>A tool to record all .NET exceptions system-wide with callstacks.</Description>
+    <PackageReadmeFile>readme.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/KirillOsenkov/Beetle</PackageProjectUrl>
+    <IconFilePath>$(MSBuildThisFileDirectory)icon.png</IconFilePath>
+    <PackageIcon>icon.png</PackageIcon>
+    <RepositoryUrl>https://github.com/KirillOsenkov/Beetle</RepositoryUrl>
+    <PackageTags>.NET dotnet ETW etl trace log exception error logging record recorder assembly</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Beetle.Core\Beetle.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="readme.md" Pack="true" PackagePath="\" />
+    <None Include="icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.29" />
+  </ItemGroup>
+
+</Project>

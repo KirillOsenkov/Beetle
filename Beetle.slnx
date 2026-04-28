@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src\Beetle\Beetle.csproj" />
+  <Project Path="src\Beetle.Core\Beetle.Core.csproj" />
+</Solution>

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <DebugType>embedded</DebugType>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+    <PackageId>Beetle.Core</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Kirill Osenkov</Authors>
+    <Company>Microsoft</Company>
+    <Description>A library to read and write .beetle files (Binary-Encoded Event Tracing Log for Exceptions)</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/KirillOsenkov/Beetle</PackageProjectUrl>
+    <PackageReadmeFile>readme.md</PackageReadmeFile>
+    <IconFilePath>$(MSBuildThisFileDirectory)..\Beetle\icon.png</IconFilePath>
+    <PackageIcon>icon.png</PackageIcon>
+    <RepositoryUrl>https://github.com/KirillOsenkov/Beetle</RepositoryUrl>
+    <PackageTags>.NET dotnet ETL ETW perfview log trace exception exceptions record recorder assembly</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Reflection.Metadata" Version="9.0.15" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\Beetle\readme.md" Pack="true" PackagePath="\" />
+    <None Include="..\Beetle\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
