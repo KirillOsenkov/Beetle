@@ -1,6 +1,6 @@
 # Beetle
 
-(Binary-Encoded Event Tracing Log for Exceptions)
+(**B**inary-**E**ncoded **E**vent **T**racing **L**og for **E**xceptions)
 
 Beetle is a tool that records all .NET exceptions with callstacks system-wide into a binary log file that can be viewed on another machine.
 
