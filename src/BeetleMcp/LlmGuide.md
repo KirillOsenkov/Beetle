@@ -72,7 +72,7 @@ Pass `fields="timestamp,type,id"` (or any comma-separated subset of `timestamp,p
 
 `list_modules` and `list_native_images` can dump hundreds of entries per process; almost all of them are framework / system noise. Cut it down:
 
-- `excludeFrameworkModules=true` — hides the GAC, WinSxS, System32, dotnet shared frameworks, and the process's own install directory.
+- `excludeFrameworkModules=true` — hides the GAC, WinSxS, System32, and dotnet shared frameworks (NETCore.App / AspNetCore.App / WindowsDesktop.App). Combine with `nameRegex` / `excludePathRegex` for finer scoping.
 - `nameRegex` / `pathRegex` / `excludePathRegex` — case-insensitive regex filters.
 - `fields=name,path` — for `list_modules`, drop the GUID and method-count columns when you don't need them.
 
@@ -160,7 +160,7 @@ Sometimes the question is structural ("which child processes did `dotnet test.ex
 You want to know what's running inside a `testhost.exe` (which adapter? which test DLL?) without scrolling 400 modules.
 
 1. `find_module nameRegex=mstest|xunit|nunit|testadapter` — adapter loaded across all processes, one row per hit.
-2. `list_modules <pi> excludeFrameworkModules=true fields=name,path` — strips the testhost's own install dir + the GAC, leaves user / product code.
+2. `list_modules <pi> excludeFrameworkModules=true fields=name,path` — hides the GAC and dotnet shared frameworks; pair with `excludePathRegex` if the host's install dir still contributes a lot of noise.
 3. To go the other way ("is `Microsoft.PowerBI.Foo` ever loaded?"): `find_module nameRegex=^Microsoft\.PowerBI\.Foo$`.
 
 ## Output format reminders

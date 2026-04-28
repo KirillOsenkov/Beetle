@@ -393,7 +393,7 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
     [Description(@"Lists managed modules (assemblies) loaded in a process. Each line is tab-separated. Default columns: 'name  filePath  pdbGuid  methods=N'.
 
 Tips for cutting noise:
-  - excludeFrameworkModules=true hides the GAC, WinSxS / System32, dotnet shared frameworks, and the process's own install directory — leaves user / product code.
+  - excludeFrameworkModules=true hides the GAC, WinSxS / System32, and the dotnet shared frameworks.
   - nameRegex / pathRegex / excludePathRegex (case-insensitive) for surgical filters.
   - fields=name,path (or any subset of name,path,pdb,methods) trims columns when you only need names.
 
@@ -401,11 +401,10 @@ For 'is module X loaded anywhere?' across all processes, use find_module instead
     public static string ListModules(
         [Description("processIndex (the number in [pi] brackets)")] int processIndex,
         [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
-        [Description("Optional case-insensitive substring filter on file path")] string? pathFilter = null,
         [Description("Optional regex on the module name (Module.Name)")] string? nameRegex = null,
         [Description("Optional regex on the module's file path")] string? pathRegex = null,
         [Description("Optional regex on the module's file path — exclusion")] string? excludePathRegex = null,
-        [Description("If true, hide framework / system modules (GAC, WinSxS / System32, dotnet shared frameworks, the process's own install directory). Default false.")] bool? excludeFrameworkModules = null,
+        [Description("If true, hide framework / system modules: the GAC, WinSxS / System32, and the dotnet shared frameworks (NETCore.App / AspNetCore.App / WindowsDesktop.App). Pair with nameRegex / excludePathRegex for finer scoping. Default false.")] bool? excludeFrameworkModules = null,
         [Description("Comma-separated subset of 'name,path,pdb,methods'. Default: all.")] string? fields = null,
         [Description("Number of leading entries to skip (default 0)")] int? skip = null,
         [Description("Maximum number of entries to return (default 200, max 5000)")] int? maxResults = null) => Run(() =>
@@ -419,17 +418,10 @@ For 'is module X loaded anywhere?' across all processes, use find_module instead
         var pathRx = CompileOpt(pathRegex);
         var excludePathRx = CompileOpt(excludePathRegex);
         bool hideFx = excludeFrameworkModules ?? false;
-        string? processInstallDir = hideFx ? GetInstallDirectory(p) : null;
 
         var projected = ParseModuleFields(fields);
 
         IEnumerable<Module> modules = p.Modules;
-        if (!string.IsNullOrEmpty(pathFilter))
-        {
-            modules = modules.Where(m => m.FilePath != null &&
-                m.FilePath.IndexOf(pathFilter, StringComparison.OrdinalIgnoreCase) >= 0);
-        }
-
         if (nameRx != null)
         {
             modules = modules.Where(m => m.Name != null && nameRx.IsMatch(m.Name));
@@ -447,7 +439,7 @@ For 'is module X loaded anywhere?' across all processes, use find_module instead
 
         if (hideFx)
         {
-            modules = modules.Where(m => !IsFrameworkPath(m.FilePath, processInstallDir));
+            modules = modules.Where(m => !IsFrameworkPath(m.FilePath));
         }
 
         var ordered = modules
@@ -570,14 +562,13 @@ Use this to answer 'is X loaded anywhere?' without dumping all modules per proce
     [McpServerTool(Name = "list_native_images", ReadOnly = true, Idempotent = true)]
     [Description(@"Lists native images (DLLs/EXEs) loaded into a process's address space. Each line: 'filePath  startAddress  size'.
 
-excludeFrameworkModules=true hides Windows / dotnet shared / WinSxS / process-install-dir entries.")]
+excludeFrameworkModules=true hides Windows / dotnet shared / WinSxS entries (and the install dir itself, only when the process is a framework host like testhost / dotnet).")]
     public static string ListNativeImages(
         [Description("processIndex (the number in [pi] brackets)")] int processIndex,
         [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
-        [Description("Optional case-insensitive substring filter on file path")] string? pathFilter = null,
         [Description("Optional regex on the image's file path")] string? pathRegex = null,
         [Description("Optional regex on the image's file path — exclusion")] string? excludePathRegex = null,
-        [Description("If true, hide framework / system images (Windows, dotnet shared, WinSxS, the process's own install directory). Default false.")] bool? excludeFrameworkModules = null,
+        [Description("If true, hide framework / system images: Windows, dotnet shared, WinSxS, and — when the process is a framework host (testhost / dotnet / vstest.console / etc.) — the install dir itself. For product processes whose install dir contains the product binaries, leave this off and use pathRegex / excludePathRegex. Default false.")] bool? excludeFrameworkModules = null,
         [Description("Number of leading entries to skip (default 0)")] int? skip = null,
         [Description("Maximum number of entries to return (default 200, max 5000)")] int? maxResults = null) => Run(() =>
     {
@@ -589,15 +580,8 @@ excludeFrameworkModules=true hides Windows / dotnet shared / WinSxS / process-in
         var pathRx = CompileOpt(pathRegex);
         var excludePathRx = CompileOpt(excludePathRegex);
         bool hideFx = excludeFrameworkModules ?? false;
-        string? processInstallDir = hideFx ? GetInstallDirectory(p) : null;
 
         IEnumerable<Image> images = p.NativeImages;
-        if (!string.IsNullOrEmpty(pathFilter))
-        {
-            images = images.Where(im => im.FilePath != null &&
-                im.FilePath.IndexOf(pathFilter, StringComparison.OrdinalIgnoreCase) >= 0);
-        }
-
         if (pathRx != null)
         {
             images = images.Where(im => im.FilePath != null && pathRx.IsMatch(im.FilePath));
@@ -610,7 +594,7 @@ excludeFrameworkModules=true hides Windows / dotnet shared / WinSxS / process-in
 
         if (hideFx)
         {
-            images = images.Where(im => !IsFrameworkPath(im.FilePath, processInstallDir));
+            images = images.Where(im => !IsFrameworkPath(im.FilePath));
         }
 
         var ordered = images
@@ -740,7 +724,7 @@ excludeFrameworkModules=true hides Windows / dotnet shared / WinSxS / process-in
         @"\dotnet\host\",
     };
 
-    private static bool IsFrameworkPath(string? filePath, string? processInstallDir)
+    private static bool IsFrameworkPath(string? filePath)
     {
         if (string.IsNullOrEmpty(filePath))
         {
@@ -755,31 +739,7 @@ excludeFrameworkModules=true hides Windows / dotnet shared / WinSxS / process-in
             }
         }
 
-        if (!string.IsNullOrEmpty(processInstallDir) &&
-            filePath.StartsWith(processInstallDir, StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
         return false;
-    }
-
-    private static string? GetInstallDirectory(Process p)
-    {
-        var fp = p.FilePath;
-        if (string.IsNullOrEmpty(fp))
-        {
-            return null;
-        }
-
-        try
-        {
-            return System.IO.Path.GetDirectoryName(fp);
-        }
-        catch
-        {
-            return null;
-        }
     }
 
     [McpServerTool(Name = "get_process_parent_chain", ReadOnly = true, Idempotent = true)]
