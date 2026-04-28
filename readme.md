@@ -1,5 +1,7 @@
 # Beetle
 
+(Binary-Encoded Event Tracing Log for Exceptions)
+
 Beetle is a tool that records all .NET exceptions with callstacks system-wide into a binary log file that can be viewed on another machine.
 
 Beetle starts a copy of itself under admin if it's not running as administrator. It needs admin permissions to create a kernel ETW session.
