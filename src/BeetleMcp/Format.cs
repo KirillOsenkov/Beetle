@@ -10,6 +10,8 @@ internal static class Format
 {
     public static string Iso(DateTime dt) => dt.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
 
+    public static string Ms(double milliseconds) => milliseconds.ToString("F0", CultureInfo.InvariantCulture);
+
     public static string ProcessName(Process p)
     {
         if (!string.IsNullOrEmpty(p.ImageFileName))
@@ -67,14 +69,13 @@ internal static class Format
         return sb.ToString();
     }
 
-    public static string Shorten(string text, int max)
+    public static string Shorten(string? text, int max)
     {
         if (text == null)
         {
             return string.Empty;
         }
 
-        // Collapse newlines so a single line stays single.
         text = text.Replace("\r\n", " ").Replace('\n', ' ').Replace('\r', ' ');
         if (text.Length <= max)
         {

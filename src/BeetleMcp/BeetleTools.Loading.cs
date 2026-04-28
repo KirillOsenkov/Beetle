@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text;
@@ -59,7 +60,7 @@ public static partial class BeetleTools
         var s = entry.Session;
 
         int totalExceptions = 0;
-        var distinctTypes = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        var distinctTypes = new HashSet<string>(StringComparer.Ordinal);
         foreach (var p in s.Processes)
         {
             totalExceptions += p.Exceptions.Count;
@@ -77,7 +78,7 @@ public static partial class BeetleTools
         sb.Append("fileSize: ").Append(entry.FileSize.ToString("n0")).AppendLine(" bytes");
         sb.Append("startTime: ").AppendLine(Format.Iso(s.StartTime));
         sb.Append("endTime: ").AppendLine(Format.Iso(s.EndTime));
-        sb.Append("durationMs: ").AppendLine(s.SessionEndTimeRelativeMSec.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
+        sb.Append("durationMs: ").AppendLine(Format.Ms(s.SessionEndTimeRelativeMSec));
         sb.Append("eventsLost: ").AppendLine(s.EventsLost.ToString());
         sb.Append("processes: ").AppendLine(s.Processes.Count.ToString());
         sb.Append("exceptions: ").AppendLine(totalExceptions.ToString());

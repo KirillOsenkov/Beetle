@@ -186,6 +186,10 @@ internal sealed class CompiledFilter
     private static Regex? Compile(string? pattern) =>
         string.IsNullOrEmpty(pattern) ? null : new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
+    internal static Regex? CompileProcessNameRegex(string? pattern) => Compile(pattern);
+
+    internal static bool ProcessNameMatches(Regex regex, Process p) => MatchProcessName(regex, p);
+
     private static HashSet<int>? ToSet(int[]? values) =>
         values is { Length: > 0 } ? new HashSet<int>(values) : null;
 }

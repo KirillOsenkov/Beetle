@@ -23,7 +23,7 @@ Time window options:
   aroundTime + windowMs — center +/- windowMs (great for correlating with timestamps from a test log)
 If both are supplied the intersection is used.
 
-If the result count exceeds the cap, the header ends with 'matched=N+' meaning more matches were truncated. To get a cap-free total without paging, use count_exception_types or count_exception_messages.")]
+If the result count exceeds the cap, the header ends with 'matched=N+' meaning more matches were truncated. To get a cap-free total without paging, use count_exceptions.")]
     public static string QueryExceptions(
         [Description("Absolute path to a .beetle file")] string path,
         [Description("Restrict to these processIndex values (canonical handle; PIDs are reused so prefer this)")] int[]? processIndices = null,
@@ -63,24 +63,23 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
             messageRegex, excludeMessageRegex,
             startTime, endTime, aroundTime, windowMs);
 
-        // Stop streaming once we have offset+take+1 hits, but still count the cap-hit flag.
-        int seen = 0;
-        int kept = 0;
+        // Stream the filter, skipping `offset`, collecting up to `take` into the page.
+        // We peek one extra item after the page is full to detect overflow ("matched=N+").
+        int matched = 0;
         var page = new List<ExceptionRef>(take);
         bool capHit = false;
-        int hardLimit = offset + take;
 
         foreach (var r in filter.FilterExceptions(entry))
         {
-            seen++;
-            if (kept < hardLimit)
+            matched++;
+            if (matched <= offset)
             {
-                if (seen > offset)
-                {
-                    page.Add(r);
-                }
+                continue;
+            }
 
-                kept = seen <= offset ? 0 : page.Count;
+            if (page.Count < take)
+            {
+                page.Add(r);
             }
             else
             {
@@ -93,7 +92,7 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
         sb.Append("exceptions: ").Append(page.Count)
           .Append(" (skip=").Append(offset)
           .Append(", take=").Append(take)
-          .Append(", matched=").Append(seen);
+          .Append(", matched=").Append(matched);
         if (capHit)
         {
             sb.Append('+');
@@ -202,8 +201,10 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
         [Description("Half-window in milliseconds (default 5000 = 10s window)")] double? windowMs = null,
         [Description("Optional regex on process image file name / file path basename")] string? processNameRegex = null,
         [Description("Optional regex on exception type")] string? exceptionTypeRegex = null,
+        [Description("Number of leading results to skip (default 0)")] int? skip = null,
         [Description("Maximum number of results (default 200, max 5000)")] int? maxResults = null) => Run(() =>
     {
+        int offset = Math.Max(skip ?? 0, 0);
         int take = Math.Clamp(maxResults ?? DefaultMaxResults, 1, MaxAllowedResults);
         double half = windowMs ?? 5000;
 
@@ -214,34 +215,30 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
             exceptionTypeRegex, null, null, null,
             null, null, aroundTime, half);
 
-        var hits = filter.FilterExceptions(entry)
+        // Order by timestamp, then page. Filter is bounded by the +/- window so
+        // the materialized list is small enough to sort in memory.
+        var ordered = filter.FilterExceptions(entry)
             .OrderBy(r => r.Exception.Timestamp)
-            .Take(take + 1)
             .ToList();
-        bool capHit = hits.Count > take;
-        if (capHit)
-        {
-            hits.RemoveAt(hits.Count - 1);
-        }
+        int matched = ordered.Count;
+        var page = ordered.Skip(offset).Take(take).ToList();
 
         var sb = new StringBuilder();
         sb.Append("around: ").AppendLine(Format.Iso(aroundTime));
-        sb.Append("window: +/-").Append(half.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)).AppendLine(" ms");
-        sb.Append("exceptions: ").Append(hits.Count);
-        if (capHit)
-        {
-            sb.Append('+');
-        }
+        sb.Append("window: +/-").Append(Format.Ms(half)).AppendLine(" ms");
+        sb.Append("exceptions: ").Append(page.Count)
+          .Append(" (skip=").Append(offset)
+          .Append(", take=").Append(take)
+          .Append(", matched=").Append(matched)
+          .AppendLine(")");
 
-        sb.AppendLine();
-
-        if (hits.Count == 0)
+        if (page.Count == 0)
         {
             sb.AppendLine("(no exceptions in window)");
             return sb.ToString();
         }
 
-        foreach (var r in hits)
+        foreach (var r in page)
         {
             sb.AppendLine(Format.ExceptionLine(entry, r));
         }
@@ -281,14 +278,14 @@ If the result count exceeds the cap, the header ends with 'matched=N+' meaning m
             preceding.Add(new ExceptionRef(pi, p, i, ex));
         }
 
-        preceding.Reverse(); // chronological order
+        preceding.Reverse();
 
         var sb = new StringBuilder();
         sb.Append("anchor: ").AppendLine(Format.ExceptionLine(entry, new ExceptionRef(pi, p, ei, anchor)));
         sb.Append("preceding: ").Append(preceding.Count);
         if (withinMs.HasValue)
         {
-            sb.Append(" (within ").Append(withinMs.Value.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)).Append(" ms)");
+            sb.Append(" (within ").Append(Format.Ms(withinMs.Value)).Append(" ms)");
         }
 
         sb.AppendLine();

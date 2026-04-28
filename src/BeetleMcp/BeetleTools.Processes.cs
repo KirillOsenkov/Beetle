@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using GuiLabs.Dotnet.Recorder;
 using ModelContextProtocol.Server;
 
@@ -114,7 +115,7 @@ processIndex is the canonical handle — get it from list_processes or query_exc
         if (p.StopTimeRelativeMSec > 0)
         {
             sb.Append("stopTime: ").AppendLine(Format.Iso(entry.ToAbsolute(p.StopTimeRelativeMSec)));
-            sb.Append("durationMs: ").AppendLine((p.StopTimeRelativeMSec - p.StartTimeRelativeMSec).ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
+            sb.Append("durationMs: ").AppendLine(Format.Ms(p.StopTimeRelativeMSec - p.StartTimeRelativeMSec));
             sb.Append("exitCode: ").AppendLine(p.ExitCode.ToString());
         }
         else
@@ -142,11 +143,7 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
         var processes = s.Processes;
 
         // Index processes by (pid, startTimeRelativeMSec) so parent links can disambiguate reused PIDs.
-        var byKey = new Dictionary<(int pid, double start), int>();
-        for (int i = 0; i < processes.Count; i++)
-        {
-            byKey[(processes[i].Id, processes[i].StartTimeRelativeMSec)] = i;
-        }
+        var byKey = BuildKeyMap(processes);
 
         var children = new List<int>[processes.Count];
         var roots = new List<int>();
@@ -169,61 +166,43 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
             }
         }
 
-        // Subtree exception totals (for min-count filtering).
-        var subtreeExceptions = new int[processes.Count];
-        void ComputeSubtree(int i)
+        // Subtree exception totals — only needed when filtering by min count.
+        int[]? subtreeExceptions = null;
+        if (minExceptionCount.HasValue)
         {
-            int total = processes[i].Exceptions.Count;
-            if (children[i] is { } cs)
+            subtreeExceptions = new int[processes.Count];
+            void ComputeSubtree(int i)
             {
-                foreach (var c in cs)
+                int total = processes[i].Exceptions.Count;
+                if (children[i] is { } cs)
                 {
-                    ComputeSubtree(c);
-                    total += subtreeExceptions[c];
+                    foreach (var c in cs)
+                    {
+                        ComputeSubtree(c);
+                        total += subtreeExceptions[c];
+                    }
                 }
+
+                subtreeExceptions[i] = total;
             }
 
-            subtreeExceptions[i] = total;
+            foreach (var r in roots)
+            {
+                ComputeSubtree(r);
+            }
         }
 
-        foreach (var r in roots)
+        Regex? nameRx = CompiledFilter.CompileProcessNameRegex(processNameRegex);
+
+        bool MatchesName(int i) => nameRx == null || CompiledFilter.ProcessNameMatches(nameRx, processes[i]);
+
+        bool MeetsMinCount(int i) =>
+            subtreeExceptions == null || subtreeExceptions[i] >= minExceptionCount!.Value;
+
+        // Does this subtree contain any name-matching node? Only consulted when
+        // a name regex is in use; collapses to "always true" otherwise.
+        bool SubtreeHasNameMatch(int i)
         {
-            ComputeSubtree(r);
-        }
-
-        System.Text.RegularExpressions.Regex? nameRx = string.IsNullOrEmpty(processNameRegex)
-            ? null
-            : new System.Text.RegularExpressions.Regex(processNameRegex,
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
-
-        bool MatchesName(int i)
-        {
-            if (nameRx == null)
-            {
-                return true;
-            }
-
-            var p = processes[i];
-            if (p.ImageFileName != null && nameRx.IsMatch(p.ImageFileName))
-            {
-                return true;
-            }
-
-            if (!string.IsNullOrEmpty(p.FilePath) && nameRx.IsMatch(System.IO.Path.GetFileName(p.FilePath)!))
-            {
-                return true;
-            }
-
-            return false;
-        }
-
-        bool ShowSubtree(int i)
-        {
-            if (minExceptionCount.HasValue && subtreeExceptions[i] < minExceptionCount.Value)
-            {
-                return false;
-            }
-
             if (MatchesName(i))
             {
                 return true;
@@ -233,7 +212,7 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
             {
                 foreach (var c in cs)
                 {
-                    if (ShowSubtree(c))
+                    if (SubtreeHasNameMatch(c))
                     {
                         return true;
                     }
@@ -245,9 +224,20 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
 
         var sb = new StringBuilder();
         int rendered = 0;
-        void Write(int i, int depth)
+        void Write(int i, int depth, bool ancestorMatched)
         {
-            if (!ShowSubtree(i))
+            // minExceptionCount prunes the subtree structurally regardless of name matching.
+            if (!MeetsMinCount(i))
+            {
+                return;
+            }
+
+            // Show node when: no name filter, OR an ancestor matched (so the user
+            // can see what matched and what it spawned), OR this subtree contains
+            // a name match somewhere below.
+            bool selfMatches = MatchesName(i);
+            bool show = nameRx == null || ancestorMatched || selfMatches || SubtreeHasNameMatch(i);
+            if (!show)
             {
                 return;
             }
@@ -260,18 +250,19 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
             sb.AppendLine(Format.ProcessLine(i, processes[i]));
             rendered++;
 
+            bool subtreeAncestorMatched = ancestorMatched || selfMatches;
             if (children[i] is { } cs)
             {
                 foreach (var c in cs.OrderBy(c => processes[c].StartTimeRelativeMSec))
                 {
-                    Write(c, depth + 1);
+                    Write(c, depth + 1, subtreeAncestorMatched);
                 }
             }
         }
 
         foreach (var r in roots.OrderBy(r => processes[r].StartTimeRelativeMSec))
         {
-            Write(r, 0);
+            Write(r, 0, ancestorMatched: false);
         }
 
         if (rendered == 0)
@@ -322,7 +313,7 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
         {
             sb.Append(m.Name ?? "<null>").Append('\t')
               .Append(m.FilePath ?? "<null>").Append('\t')
-              .Append(m.PdbGuid).Append('\t')
+              .Append(m.PdbGuid == Guid.Empty ? "<no-pdb>" : m.PdbGuid.ToString()).Append('\t')
               .Append("methods=").Append(m.Methods.Count).AppendLine();
         }
 
@@ -374,6 +365,182 @@ Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse doe
 
         return sb.ToString();
     });
+
+    [McpServerTool(Name = "get_process_parent_chain", ReadOnly = true, Idempotent = true)]
+    [Description(@"Returns the chain of ancestor processes for a given process, from the recorded root down to the target. Each line is one process, indented by depth:
+  name pid=N [exitCode=E] exceptions=N [pi]
+
+The last (most-indented) line is the target. Useful for answering 'who started this process?' without manually walking parent links. Parents are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse can't cross-link unrelated processes. If the parent isn't recorded in the session the chain stops there.")]
+    public static string GetProcessParentChain(
+        [Description("Absolute path to a .beetle file")] string path,
+        [Description("processIndex (the [pi] number) of the process whose parent chain you want")] int processIndex) => Run(() =>
+    {
+        var entry = Cache.Load(path);
+        var processes = entry.Session.Processes;
+        ResolveProcess(entry, processIndex);
+
+        var byKey = BuildKeyMap(processes);
+
+        // Walk parents, guarding against cycles (shouldn't happen, but cheap).
+        var chain = new List<int>();
+        var seen = new HashSet<int>();
+        int cur = processIndex;
+        while (cur >= 0 && seen.Add(cur))
+        {
+            chain.Add(cur);
+            var p = processes[cur];
+            if (p.ParentId == 0)
+            {
+                break;
+            }
+
+            if (!byKey.TryGetValue((p.ParentId, p.ParentStartTimeRelativeMSec), out var parentIdx))
+            {
+                break;
+            }
+
+            cur = parentIdx;
+        }
+
+        chain.Reverse();
+
+        var sb = new StringBuilder();
+        sb.Append("parent chain for [").Append(processIndex).Append("]: ")
+          .Append(chain.Count).AppendLine(" level(s)");
+
+        var rootProc = processes[chain[0]];
+        if (rootProc.ParentId != 0 && !byKey.ContainsKey((rootProc.ParentId, rootProc.ParentStartTimeRelativeMSec)))
+        {
+            sb.Append("(parent of root in chain not recorded: parentPid=").Append(rootProc.ParentId);
+            if (!string.IsNullOrEmpty(rootProc.ParentImageFileName))
+            {
+                sb.Append(" parentImage=").Append(rootProc.ParentImageFileName);
+            }
+
+            if (rootProc.ParentStartTimeRelativeMSec > 0)
+            {
+                sb.Append(" parentStart=").Append(Format.Iso(entry.ToAbsolute(rootProc.ParentStartTimeRelativeMSec)));
+            }
+
+            sb.AppendLine(")");
+        }
+
+        for (int depth = 0; depth < chain.Count; depth++)
+        {
+            for (int d = 0; d < depth * 2; d++)
+            {
+                sb.Append(' ');
+            }
+
+            sb.AppendLine(Format.ProcessLine(chain[depth], processes[chain[depth]]));
+        }
+
+        return sb.ToString();
+    });
+
+    [McpServerTool(Name = "get_process_children", ReadOnly = true, Idempotent = true)]
+    [Description(@"Lists processes spawned by a given parent process. With recursive=false (default) returns only direct children, flat. With recursive=true returns the full descendant subtree, indented by depth. Useful for answering 'what did this process spawn?' in one call.
+
+Children are matched on (parentPid, parentStartTimeRelativeMSec) so PID reuse can't cross-link unrelated processes. Filters apply only to descendants — the parent line is always shown for context.")]
+    public static string GetProcessChildren(
+        [Description("Absolute path to a .beetle file")] string path,
+        [Description("processIndex (the [pi] number) of the parent process whose children you want")] int processIndex,
+        [Description("If true, include the entire descendant subtree (indented). If false (default), only direct children.")] bool? recursive = null,
+        [Description("Optional regex filter on descendant ImageFileName / FilePath basename")] string? processNameRegex = null,
+        [Description("Number of leading entries to skip (default 0)")] int? skip = null,
+        [Description("Maximum number of entries to return (default 200, max 5000)")] int? maxResults = null) => Run(() =>
+    {
+        int offset = Math.Max(skip ?? 0, 0);
+        int take = Math.Clamp(maxResults ?? DefaultMaxResults, 1, MaxAllowedResults);
+        bool deep = recursive ?? false;
+
+        var entry = Cache.Load(path);
+        var processes = entry.Session.Processes;
+        var parent = ResolveProcess(entry, processIndex);
+
+        var byKey = BuildKeyMap(processes);
+        var children = new List<int>[processes.Count];
+        for (int i = 0; i < processes.Count; i++)
+        {
+            var p = processes[i];
+            if (p.ParentId == 0)
+            {
+                continue;
+            }
+
+            if (byKey.TryGetValue((p.ParentId, p.ParentStartTimeRelativeMSec), out var parentIdx))
+            {
+                (children[parentIdx] ??= new List<int>()).Add(i);
+            }
+        }
+
+        Regex? nameRx = CompiledFilter.CompileProcessNameRegex(processNameRegex);
+
+        bool MatchesName(int i) => nameRx == null || CompiledFilter.ProcessNameMatches(nameRx, processes[i]);
+
+        var collected = new List<(int pi, int depth)>();
+        void Walk(int i, int depth)
+        {
+            if (depth > 0 && MatchesName(i))
+            {
+                collected.Add((i, depth));
+            }
+
+            if (depth == 0 || deep)
+            {
+                if (children[i] is { } cs)
+                {
+                    foreach (var c in cs.OrderBy(c => processes[c].StartTimeRelativeMSec))
+                    {
+                        Walk(c, depth + 1);
+                    }
+                }
+            }
+        }
+
+        Walk(processIndex, 0);
+
+        int total = collected.Count;
+        var page = collected.Skip(offset).Take(take).ToList();
+
+        var sb = new StringBuilder();
+        sb.Append("parent: ").AppendLine(Format.ProcessLine(processIndex, parent));
+        sb.Append(deep ? "descendants: " : "direct children: ").Append(page.Count)
+          .Append(" (skip=").Append(offset)
+          .Append(", take=").Append(take)
+          .Append(", matched=").Append(total)
+          .AppendLine(")");
+
+        if (page.Count == 0)
+        {
+            sb.AppendLine("(none)");
+            return sb.ToString();
+        }
+
+        foreach (var (pi, depth) in page)
+        {
+            int indent = deep ? depth * 2 : 2;
+            for (int d = 0; d < indent; d++)
+            {
+                sb.Append(' ');
+            }
+
+            sb.AppendLine(Format.ProcessLine(pi, processes[pi]));
+        }
+
+        return sb.ToString();
+    });
+
+    private static Dictionary<(int pid, double start), int> BuildKeyMap(IReadOnlyList<Process> processes)
+    {
+        var byKey = new Dictionary<(int pid, double start), int>(processes.Count);
+        for (int i = 0; i < processes.Count; i++)
+        {
+            byKey[(processes[i].Id, processes[i].StartTimeRelativeMSec)] = i;
+        }
+
+        return byKey;
+    }
 
     internal static Process ResolveProcess(LoadedBeetle entry, int processIndex)
     {

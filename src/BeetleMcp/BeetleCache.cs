@@ -33,11 +33,12 @@ public sealed class LoadedBeetle
 /// </summary>
 public sealed class BeetleCache
 {
-    // Loose heuristic: a .beetle is gzip'd and expands non-trivially in memory
-    // (string table, callstack interning, jitted-method maps).
+    // .beetle files are gzip'd; in-memory expansion (strings, callstacks, jitted-method maps) is roughly this multiple of the file size.
     public const long MemoryMultiplier = 20;
 
     private readonly object syncRoot = new();
+    // Serializes the slow load path so two callers can't race loading the same (or different) files concurrently.
+    private readonly object loadLock = new();
     private readonly Dictionary<string, LoadedBeetle> entries = new(PathComparer);
 
     public BeetleCache(long? memoryBudgetBytes = null)
@@ -56,46 +57,64 @@ public sealed class BeetleCache
         }
 
         var info = new FileInfo(path);
-        long estimated = info.Length * MemoryMultiplier;
 
+        if (!forceReload && TryGetFresh(path, info, out var cached))
+        {
+            return cached!;
+        }
+
+        lock (loadLock)
+        {
+            if (!forceReload && TryGetFresh(path, info, out cached))
+            {
+                return cached!;
+            }
+
+            // Load before evicting so a failure doesn't drop the previously-cached version.
+            var session = SessionSerializer.Load(path);
+
+            var entry = new LoadedBeetle
+            {
+                Path = path,
+                Session = session,
+                FileSize = info.Length,
+                LastWriteTimeUtc = info.LastWriteTimeUtc,
+                LoadedAtUtc = DateTime.UtcNow,
+                LastAccessedUtc = DateTime.UtcNow
+            };
+
+            long estimated = info.Length * MemoryMultiplier;
+            lock (syncRoot)
+            {
+                if (entries.Remove(path))
+                {
+                    ForceCollect();
+                }
+
+                EvictToFit(estimated);
+                entries[path] = entry;
+            }
+
+            return entry;
+        }
+    }
+
+    private bool TryGetFresh(string path, FileInfo info, out LoadedBeetle? entry)
+    {
         lock (syncRoot)
         {
-            if (!forceReload &&
-                entries.TryGetValue(path, out var cached) &&
+            if (entries.TryGetValue(path, out var cached) &&
                 cached.FileSize == info.Length &&
                 cached.LastWriteTimeUtc == info.LastWriteTimeUtc)
             {
                 cached.LastAccessedUtc = DateTime.UtcNow;
-                return cached;
+                entry = cached;
+                return true;
             }
-
-            if (entries.Remove(path))
-            {
-                ForceCollect();
-            }
-
-            EvictToFit(estimated);
         }
 
-        // Slow path outside the lock.
-        var session = SessionSerializer.Load(path);
-
-        var entry = new LoadedBeetle
-        {
-            Path = path,
-            Session = session,
-            FileSize = info.Length,
-            LastWriteTimeUtc = info.LastWriteTimeUtc,
-            LoadedAtUtc = DateTime.UtcNow,
-            LastAccessedUtc = DateTime.UtcNow
-        };
-
-        lock (syncRoot)
-        {
-            entries[path] = entry;
-        }
-
-        return entry;
+        entry = null;
+        return false;
     }
 
     public bool Unload(string path)

@@ -19,20 +19,20 @@ PIDs are **reused** within a single recording (Windows recycles them quickly). D
 
 - `[pi]` is the **processIndex** — the position in `Session.Processes`. This is the canonical handle. Always pass `processIndex`.
 - `[pi/ei]` identifies a single exception: process index `pi`, exception index `ei` within that process.
-- The `get_process_tree` tool matches parents on `(parentPid, parentStartTimeRelativeMSec)` so reused PIDs don't cross-link.
+- The `get_process_tree` tool matches parents on `(parentPid, parentStartTimeRelativeMSec)` so reused PIDs don't cross-link. The same matching is used by `get_process_parent_chain` and `get_process_children`.
 - Ids are scoped to one `.beetle` file's bytes; reload a different file → discard the ids.
 
 ## The core loop
 
 1. **`get_session_summary <path>`** — file size, recording window (UTC), eventsLost, processes, exceptions, distinct exception types. Always cheap.
-2. **`count_exception_types <path>`** — the type histogram. This is your triage primitive.
+2. **`count_exceptions <path>`** — the type histogram (groupBy='type' by default). This is your triage primitive. Switch to groupBy='type+message' when many sites share a type.
 3. **`query_exceptions <path> ...filters...`** — narrow down to interesting ones; copy `[pi/ei]` ids out.
 4. **`get_exception <path> <pi/ei>`** — full stack trace.
-5. Drill sideways: `list_processes`, `get_process`, `get_process_tree`, `list_modules`, `list_native_images`.
+5. Drill sideways: `list_processes`, `get_process`, `get_process_tree`, `get_process_parent_chain`, `get_process_children`, `list_modules`, `list_native_images`.
 
 Files are loaded on first use and cached. `load_beetle` / `reload_beetle` / `unload_beetle` are explicit controls.
 
-## Filter reference (shared by query_exceptions / count_exception_types / count_exception_messages)
+## Filter reference (shared by query_exceptions / count_exceptions / diff_exceptions)
 
 | Filter | Meaning |
 |--------|---------|
@@ -52,25 +52,25 @@ All regexes are case-insensitive. All filters AND together.
 Like with binlogs:
 
 - `query_exceptions` is **capped + paged** (default 200 / max 5000). The header ends with `matched=N+` if the cap was hit.
-- `count_exception_types` / `count_exception_messages` make a **full pass with no cap**, sort by frequency, and truncate the *output* (not the count). Use these when you need the truth.
-- `diff_exception_types` / `diff_exception_messages` build full histograms on both files and produce three sections: ONLY IN LEFT, ONLY IN RIGHT, COMMON DELTA.
+- `count_exceptions` makes a **full pass with no cap**, sorts by frequency, and truncates the *output* (not the count). Pick a `groupBy` to control the histogram key. Use this when you need the truth.
+- `diff_exceptions` builds full histograms on both files and produces three sections: ONLY IN LEFT, ONLY IN RIGHT, COMMON DELTA. Same `groupBy` knob.
 
 Decision rule:
 - "show me a few" → `query_exceptions`
-- "what's the type histogram?" → `count_exception_types`
-- "what's different between these two runs?" → `diff_exception_types` / `diff_exception_messages`
+- "what's the histogram?" → `count_exceptions` (groupBy='type' for triage; 'type+message' for finer signal)
+- "what's different between these two runs?" → `diff_exceptions`
 
 ## Recipes
 
 ### Cold-start triage (do this first on any unfamiliar file)
 1. `get_session_summary <path>` — note `eventsLost` (non-zero means the recording dropped some events under load — don't over-trust counts), session window, process count, exception count.
-2. `count_exception_types <path>` — see the top types. The long tail of `OperationCanceledException` / `TaskCanceledException` is usually noise; user-defined exceptions are usually signal.
+2. `count_exceptions <path>` — see the top types. The long tail of `OperationCanceledException` / `TaskCanceledException` is usually noise; user-defined exceptions are usually signal.
 3. `list_processes <path> sortBy=exceptions` — which processes throw the most? Often one rogue process dominates.
 4. `query_exceptions <path> processNameRegex=<theInterestingOne> exceptionTypeRegex=<theInterestingType> maxResults=20` — sample the actual events.
 5. `get_exception <path> <pi/ei>` on a representative one for the stack trace.
 
 ### Diff a "good" run against a "bad" run
-1. `diff_exception_types good.beetle bad.beetle` — start here. The `ONLY IN RIGHT` section is the smoking gun — exception types that appeared only in the bad run.
+1. `diff_exceptions good.beetle bad.beetle` — start here. The `ONLY IN RIGHT` section is the smoking gun — exception types that appeared only in the bad run. Use `groupBy='type+message'` when types are too coarse.
 2. For shared types where the count exploded, look at `COMMON DELTA` (sorted by absolute delta).
 3. For each suspicious type, narrow on the bad file:
    `query_exceptions bad.beetle exceptionTypeRegex=^System\.IO\.IOException$ maxResults=20 includeStackTrace=true`
@@ -99,8 +99,8 @@ You found exception `[42/17]` and you want to see what fired in the same process
 ### "What can possibly throw <SymptomType>?"
 The user describes a symptom; you want to find matching exceptions across the file.
 
-1. `count_exception_types <path> exceptionTypeRegex=<symptom>` — first see how common it is and which exact subtypes occur.
-2. `count_exception_messages <path> exceptionTypeRegex=<symptom>` — usually the message disambiguates between very different bugs that share a type.
+1. `count_exceptions <path> exceptionTypeRegex=<symptom>` — first see how common it is and which exact subtypes occur.
+2. `count_exceptions <path> exceptionTypeRegex=<symptom> groupBy=type+message` — usually the message disambiguates between very different bugs that share a type.
 3. `query_exceptions <path> exceptionTypeRegex=<symptom> messageRegex=<phraseFromSymptom> includeStackTrace=true maxResults=10`.
 
 ### Process tree first, exceptions second
@@ -113,7 +113,7 @@ Sometimes the question is structural ("which child processes did `dotnet test.ex
 
 - Process line: `<startTime>  <name> pid=N exitCode=E exceptions=N [pi]`
 - Exception line: `<timestamp>  <name> pid=N  ExceptionType: message [pi/ei]` (the process columns are dropped inside scoped tools).
-- Headers always include `(skip=A, take=B, matched=C)`. A trailing `+` on `matched` means the result cap was hit; switch to a `count_*` tool for the true total.
+- Headers always include `(skip=A, take=B, matched=C)`. A trailing `+` on `matched` means the result cap was hit; switch to `count_exceptions` for the true total.
 
 ## Pitfalls
 
