@@ -66,7 +66,7 @@ Tools vary in which subset of these they expose — `query_exceptions` and `bin_
 
 ## Output projection (query_exceptions / exceptions_around_time / list_modules)
 
-Pass `fields="timestamp,type,id"` (or any comma-separated subset of `timestamp,process,type,message,id`; aliases `ts`, `time`, `proc`, `msg`) to drop columns from each exception line. `list_modules` accepts `fields="name,path"` (subset of `name,path,pdb,methods`). Default is the full line. Use this when you only need timestamps for binning, only `[pi/ei]` ids to feed into `get_exception`, or only module names to scan for an adapter — it cuts response size 5–10× on large dumps.
+Pass `fields="timestamp,type,id"` (or any comma-separated subset of `timestamp,process,type,message,id`; aliases `ts`, `time`, `proc`, `msg`) to drop columns from each exception line. `list_modules` accepts `fields="name,path"` (subset of `name,path,pdb`). Default is the full line. Use this when you only need timestamps for binning, only `[pi/ei]` ids to feed into `get_exception`, or only module names to scan for an adapter — it cuts response size 5–10× on large dumps.
 
 ## Modules and native images
 
@@ -74,7 +74,7 @@ Pass `fields="timestamp,type,id"` (or any comma-separated subset of `timestamp,p
 
 - `excludeFrameworkModules=true` — hides the GAC, WinSxS, System32, and dotnet shared frameworks (NETCore.App / AspNetCore.App / WindowsDesktop.App). Combine with `nameRegex` / `excludePathRegex` for finer scoping.
 - `nameRegex` / `pathRegex` / `excludePathRegex` — case-insensitive regex filters.
-- `fields=name,path` — for `list_modules`, drop the GUID and method-count columns when you don't need them.
+- `fields=name,path` — for `list_modules`, drop the PDB GUID column when you don't need it.
 
 For cross-process queries — "is module X loaded anywhere?" — use `find_module nameRegex=...` instead of looping `list_modules` per process.
 
