@@ -165,7 +165,7 @@ You want to know what's running inside a `testhost.exe` (which adapter? which te
 
 ## Output format reminders
 
-- Process line: `<startTime>  <name> pid=N exitCode=E durationMs=D exceptions=N [pi]` (when the process exited within the session). For processes that were still running when the session ended, `exitCode=E durationMs=D` is replaced by `stillRunningAtSessionEnd`.
+- Process line: `<startTime>  <name> pid=N exitCode=E durationMs=D exceptions=N [pi]` (when the process exited within the session). For processes that were still running when the session ended, `exitCode=E durationMs=D` is replaced by `stillRunningAtSessionEnd`. In detailed/raw process views, those still-alive processes may still present with exit code `259` (`STILL_ACTIVE`); LLMs should treat that as "alive at recording end", not as a normal failure exit code.
 - Exception line: `<timestamp>  <name> pid=N  ExceptionType: message [pi/ei]` (the process columns are dropped inside scoped tools).
 - Headers always include `(skip=A, take=B, matched=C)`. A trailing `+` on `matched` means the result cap was hit; switch to `count_exceptions` for the true total.
 
