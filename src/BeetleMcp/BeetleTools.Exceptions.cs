@@ -285,6 +285,7 @@ Provide either aroundTime (absolute UTC) or aroundOffset (relative to session st
           .Append(" (skip=").Append(offset)
           .Append(", take=").Append(take)
           .Append(", matched=").Append(matched)
+          .Append(offset + page.Count < matched ? $", nextSkip={offset + page.Count}" : string.Empty)
           .AppendLine(")");
 
         if (page.Count == 0)
