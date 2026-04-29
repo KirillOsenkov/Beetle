@@ -68,6 +68,8 @@ Tools vary in which subset of these they expose — `query_exceptions` and `bin_
 
 Pass `fields="timestamp,type,id"` (or any comma-separated subset of `timestamp,process,type,message,id`; aliases `ts`, `time`, `proc`, `msg`) to drop columns from each exception line. `list_modules` accepts `fields="name,path"` (subset of `name,path,pdb`). Default is the full line. Use this when you only need timestamps for binning, only `[pi/ei]` ids to feed into `get_exception`, or only module names to scan for an adapter — it cuts response size 5–10× on large dumps.
 
+`query_exceptions` defaults to `sortBy=process`, which streams by processIndex and then exceptionIndex within each process. Use `sortBy=time` when you need a chronological cross-process view. For small bounded time windows, prefer `exceptions_around_time`, which is always ordered by timestamp.
+
 ## Modules and native images
 
 `list_modules` and `list_native_images` can dump hundreds of entries per process; almost all of them are framework / system noise. Cut it down:

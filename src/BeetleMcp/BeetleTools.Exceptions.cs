@@ -28,7 +28,11 @@ fields controls projection (compact output for large dumps):
   default = full line with all fields. Pass a comma-separated subset of
   'timestamp,process,type,message,id' to keep only those columns. Aliases: 'ts','time','proc','msg'. 'all' / 'full' = default.
 
-If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K' so a follow-up call can pass skip=K to continue. To get a cap-free total without paging, use count_exceptions.")]
+sortBy controls result order:
+    'process' (default) streams by processIndex, then exceptionIndex within each process.
+    'time' sorts matching exceptions chronologically across processes.
+
+If the result count exceeds the cap, the header includes 'nextSkip=K' so a follow-up call can pass skip=K to continue. A '+' after matched means the streaming process-order query stopped after proving there are more results; use count_exceptions for a cap-free total.")]
     public static string QueryExceptions(
         [Description("Absolute path to a .beetle file. Optional: defaults to the most recently loaded .beetle.")] string? path = null,
         [Description("Restrict to these processIndex values (canonical handle; PIDs are reused so prefer this)")] int[]? processIndices = null,
@@ -49,6 +53,7 @@ If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K
         [Description("Half-window in milliseconds around aroundTime / aroundOffset. Default 5000 (10s window).")] double? windowMs = null,
         [Description("Comma-separated subset of 'timestamp,process,type,message,id' (aliases: ts, time, proc, msg). Default: all.")] string? fields = null,
         [Description("Include each result's full stack trace inline (expensive). Default false.")] bool? includeStackTrace = null,
+        [Description("Sort order: 'process' (default; processIndex then exceptionIndex) or 'time' (chronological across processes).")] string? sortBy = null,
         [Description("Number of leading results to skip (default 0)")] int? skip = null,
         [Description("Maximum number of results to return (default 200, max 5000)")] int? maxResults = null) => Run(() =>
     {
@@ -56,6 +61,12 @@ If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K
         int take = Math.Clamp(maxResults ?? DefaultMaxResults, 1, MaxAllowedResults);
         bool withStack = includeStackTrace ?? false;
         var projected = Format.ParseExceptionFields(fields);
+        string order = (sortBy ?? "process").ToLowerInvariant();
+        if (order is not ("process" or "time"))
+        {
+            throw new ModelContextProtocol.McpException(
+                $"Unknown sortBy '{sortBy}'. Expected one of: process, time.");
+        }
 
         var entry = ResolveBeetle(path);
         var resolvedAround = ResolveAroundTime(entry, aroundTime, aroundOffset);
@@ -73,28 +84,44 @@ If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K
             messageRegex, excludeMessageRegex,
             startTime, endTime, resolvedAround, windowMs);
 
-        // Stream the filter, skipping `offset`, collecting up to `take` into the page.
-        // We peek one extra item after the page is full to detect overflow ("matched=N+").
         int matched = 0;
         var page = new List<ExceptionRef>(take);
-        bool capHit = false;
+        bool hasMore = false;
+        bool matchedIsLowerBound = false;
 
-        foreach (var r in filter.FilterExceptions(entry))
+        if (order == "time")
         {
-            matched++;
-            if (matched <= offset)
+            var ordered = filter.FilterExceptions(entry)
+                .OrderBy(r => r.Exception.Timestamp)
+                .ThenBy(r => r.ProcessIndex)
+                .ThenBy(r => r.ExceptionIndex)
+                .ToList();
+            matched = ordered.Count;
+            page.AddRange(ordered.Skip(offset).Take(take));
+            hasMore = offset + page.Count < matched;
+        }
+        else
+        {
+            // Stream the filter, skipping `offset`, collecting up to `take` into the page.
+            // We peek one extra item after the page is full to detect overflow ("matched=N+").
+            foreach (var r in filter.FilterExceptions(entry))
             {
-                continue;
-            }
+                matched++;
+                if (matched <= offset)
+                {
+                    continue;
+                }
 
-            if (page.Count < take)
-            {
-                page.Add(r);
-            }
-            else
-            {
-                capHit = true;
-                break;
+                if (page.Count < take)
+                {
+                    page.Add(r);
+                }
+                else
+                {
+                    hasMore = true;
+                    matchedIsLowerBound = true;
+                    break;
+                }
             }
         }
 
@@ -103,9 +130,14 @@ If the result count exceeds the cap, the header ends with 'matched=N+ nextSkip=K
           .Append(" (skip=").Append(offset)
           .Append(", take=").Append(take)
           .Append(", matched=").Append(matched);
-        if (capHit)
+        if (matchedIsLowerBound)
         {
-            sb.Append("+, nextSkip=").Append(offset + page.Count);
+            sb.Append('+');
+        }
+
+        if (hasMore)
+        {
+            sb.Append(", nextSkip=").Append(offset + page.Count);
         }
 
         sb.AppendLine(")");
