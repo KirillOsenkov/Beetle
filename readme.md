@@ -49,6 +49,10 @@ Beetle.Core is a NuGet package that lets you read (or write!) .beetle files and 
 
 https://www.nuget.org/packages/Beetle.Core
 
+## Beetle Viewer
+
+[BeetleView](https://github.com/RomiTshiorny/BeetleView)
+
 ## What is a .beetle file?
 
 A `.beetle` file is a binary recording of every managed (.NET) exception thrown system-wide during a recording window on a Windows machine, captured via kernel + CLR ETW providers. For each exception it stores:
