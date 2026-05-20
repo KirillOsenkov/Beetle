@@ -22,7 +22,7 @@ public class Beetle
         if (args.Length > 0)
         {
             string arg = args[0];
-            if (arg == "start")
+            if (arg.Equals("start", StringComparison.OrdinalIgnoreCase))
             {
                 if (args.Length > 1)
                 {
@@ -32,7 +32,7 @@ public class Beetle
                 Start(logFilePath);
                 return;
             }
-            else if (arg == "stop")
+            else if (arg.Equals("stop", StringComparison.OrdinalIgnoreCase))
             {
                 Stop();
                 return;
@@ -41,21 +41,16 @@ public class Beetle
             {
                 logFilePath = arg;
             }
-            else if (arg == "-?" || arg == "/?" || arg == "-h" || arg == "/h" || arg == "help" || arg == "-help" || arg == "/help")
+            else if (IsHelpArg(arg))
             {
-                Console.WriteLine(
-                    """
-                    Usage: beetle.exe [<log-file>.beetle]
-                           Starts recording, press Ctrl+C to stop, optional log path defaults to %TEMP%\AllExceptions.beetle.
-
-                           beetle.exe start [<log-file>.beetle]
-                           Starts recording and returns immediately, while another instance of beetle.exe continues recording.
-
-                           beetle.exe stop
-                           Finds an existing instance of beetle.exe and stops recording, waits for it to finish
-                           writing the log, then returns.                   
-                    """
-                    );
+                PrintHelp(Console.Out);
+                return;
+            }
+            else
+            {
+                Console.Error.WriteLine($"Unknown argument: {arg}");
+                PrintHelp(Console.Error);
+                Environment.Exit(1);
                 return;
             }
         }
@@ -75,18 +70,21 @@ public class Beetle
             logFilePath = Path.GetFullPath(logFilePath);
         }
 
+        var logDir = Path.GetDirectoryName(logFilePath);
+        if (!string.IsNullOrEmpty(logDir))
+        {
+            Directory.CreateDirectory(logDir);
+        }
+
         StopExistingSessions();
 
-        using var traceEventSession = new TraceEventSession($"{SessionPrefix}");
+        using var traceEventSession = new TraceEventSession(SessionPrefix);
         traceEventSession.BufferSizeMB = 4096;
 
-        if (IsAdmin)
-        {
-            traceEventSession.EnableKernelProvider(
-                KernelTraceEventParser.Keywords.ImageLoad |
-                KernelTraceEventParser.Keywords.Process,
-                stackCapture: KernelTraceEventParser.Keywords.None);
-        }
+        traceEventSession.EnableKernelProvider(
+            KernelTraceEventParser.Keywords.ImageLoad |
+            KernelTraceEventParser.Keywords.Process,
+            stackCapture: KernelTraceEventParser.Keywords.None);
 
         var etwSource = traceEventSession.Source;
 
@@ -149,6 +147,38 @@ public class Beetle
         SaveNow();
     }
 
+    private static readonly string[] HelpArgs = { "-?", "/?", "-h", "/h", "help", "-help", "/help", "--help" };
+
+    private static bool IsHelpArg(string arg)
+    {
+        foreach (var h in HelpArgs)
+        {
+            if (arg.Equals(h, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void PrintHelp(System.IO.TextWriter writer)
+    {
+        writer.WriteLine(
+            """
+            Usage: beetle.exe [<log-file>.beetle]
+                   Starts recording, press Ctrl+C to stop. Optional log path defaults to
+                   %TEMP%\AllExceptions.beetle.
+
+                   beetle.exe start [<log-file>.beetle]
+                   Starts recording and returns immediately, while another instance of
+                   beetle.exe continues recording in its own console.
+
+                   beetle.exe stop
+                   Finds the running instance of beetle.exe, stops recording, waits for it
+                   to finish writing the log, then returns.
+            """);
+    }
+
     public static void Start(string filePath)
     {
         // Always launch via ShellExecute so the recorder gets its own console and is
@@ -165,7 +195,7 @@ public class Beetle
             psi.Verb = "runas";
         }
 
-        System.Diagnostics.Process.Start(psi);
+        TryStartProcess(psi);
     }
 
     public static System.Diagnostics.Process StartProcessAsAdmin(string arguments = "")
@@ -173,8 +203,25 @@ public class Beetle
         var psi = new System.Diagnostics.ProcessStartInfo(CurrentExecutable, arguments);
         psi.UseShellExecute = true;
         psi.Verb = "runas";
-        var process = System.Diagnostics.Process.Start(psi);
-        return process;
+        return TryStartProcess(psi);
+    }
+
+    // ERROR_CANCELLED = user clicked No on the UAC prompt. Surface as a clean
+    // message instead of letting it propagate as an unhandled Win32Exception.
+    private const int ERROR_CANCELLED = 1223;
+
+    private static System.Diagnostics.Process TryStartProcess(System.Diagnostics.ProcessStartInfo psi)
+    {
+        try
+        {
+            return System.Diagnostics.Process.Start(psi);
+        }
+        catch (Win32Exception ex) when (ex.NativeErrorCode == ERROR_CANCELLED)
+        {
+            Console.Error.WriteLine("Elevation was declined.");
+            Environment.Exit(2);
+            return null;
+        }
     }
 
     public static void Stop()
@@ -204,11 +251,12 @@ public class Beetle
     {
         var currentProcess = System.Diagnostics.Process.GetCurrentProcess();
         var currentProcessId = currentProcess.Id;
-        
+
         int parentId = GetParentProcessId(currentProcess.Handle);
 
-        var executable = currentProcess.ProcessName;
+        var processName = currentProcess.ProcessName;
 
+        System.Diagnostics.Process match = null;
         var allProcesses = System.Diagnostics.Process.GetProcesses();
 
         foreach (var process in allProcesses)
@@ -218,20 +266,25 @@ public class Beetle
                 var id = process.Id;
                 if (id == 0 || id == 4 || id == currentProcessId || id == parentId)
                 {
+                    process.Dispose();
                     continue;
                 }
 
-                if (process.ProcessName.Equals(executable, StringComparison.OrdinalIgnoreCase))
+                if (match == null && process.ProcessName.Equals(processName, StringComparison.OrdinalIgnoreCase))
                 {
-                    return process;
+                    match = process;
+                    continue;
                 }
+
+                process.Dispose();
             }
             catch
             {
+                try { process.Dispose(); } catch { }
             }
         }
 
-        return null;
+        return match;
     }
 
     private static int GetParentProcessId(IntPtr processHandle)
@@ -246,8 +299,12 @@ public class Beetle
             Marshal.SizeOf<PROCESS_BASIC_INFORMATION>(),
             ref returnLength);
 
+        // Best-effort: if the syscall fails we just skip parent-process exclusion
+        // in the caller's scan, which is harmless.
         if (status != 0)
-            throw new Win32Exception($"NtQueryInformationProcess failed with status 0x{status:X}");
+        {
+            return 0;
+        }
 
         return pbi.InheritedFromUniqueProcessId.ToInt32();
     }
@@ -378,7 +435,7 @@ public class Beetle
         {
             if (sessionName.StartsWith(SessionPrefix))
             {
-                var session = TraceEventSession.GetActiveSession(sessionName);
+                using var session = TraceEventSession.GetActiveSession(sessionName);
                 Console.WriteLine($"Stopping session: {sessionName}");
                 try
                 {
