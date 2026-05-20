@@ -390,7 +390,10 @@ public class Beetle
 
         try
         {
-            session.EventsLost = traceEventSession.EventsLost;
+            // EventsLost queries the live ETW session via WMI and throws COMException
+            // if the session is already gone (e.g. another instance already called Stop()).
+            // Treat that as "unknown" so we still save the events we already captured.
+            try { session.EventsLost = traceEventSession.EventsLost; } catch { }
             traceEventSession.Stop(noThrow: true);
 
             // Best-effort drain of remaining buffered ETW events before serializing.
@@ -423,8 +426,10 @@ public class Beetle
 
             Console.WriteLine($"Wrote {logFilePath}");
         }
-        catch
+        catch (Exception ex)
         {
+            // Don't swallow silently — this path is the whole reason the recorder exists.
+            try { Console.Error.WriteLine($"Failed to save {logFilePath}: {ex.GetType().Name}: {ex.Message}"); } catch { }
         }
     }
 
