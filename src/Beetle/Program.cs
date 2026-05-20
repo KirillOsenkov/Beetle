@@ -329,12 +329,15 @@ public class Beetle
     }
 
     // Shared state used by both the normal exit path and the OS console control
-    // handler. SaveNow() guards against concurrent / double save.
+    // handler. The lock makes the second caller WAIT for the first to finish
+    // (not just skip), so Main can't return — and let the runtime tear down the
+    // session and exit the process — while the handler thread is still saving.
     private static Session _session;
     private static TraceEventSession _traceEventSession;
     private static string _logFilePath;
     private static Task _task;
-    private static int _saveStarted;
+    private static readonly object _saveLock = new object();
+    private static bool _saved;
 
     // Rooted as a static field so the GC doesn't collect the delegate while
     // the OS still holds a native function pointer to it.
@@ -373,11 +376,25 @@ public class Beetle
 
     private static void SaveNow()
     {
-        if (Interlocked.Exchange(ref _saveStarted, 1) != 0)
+        // Use a lock (not Interlocked) so the SECOND caller WAITS for the first
+        // to finish, instead of skipping ahead. Without this, Main can return
+        // from SaveNow as a no-op while the OS console-ctrl handler is still
+        // mid-save, then Main returns, dispose runs, and the process exits —
+        // killing the handler thread before the file is written.
+        lock (_saveLock)
         {
-            return;
-        }
+            if (_saved)
+            {
+                return;
+            }
 
+            _saved = true;
+            SaveCore();
+        }
+    }
+
+    private static void SaveCore()
+    {
         var session = _session;
         var traceEventSession = _traceEventSession;
         var logFilePath = _logFilePath;
