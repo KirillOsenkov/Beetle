@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Diagnostics.Tracing;
 using Microsoft.Diagnostics.Tracing.Parsers;
@@ -129,27 +130,38 @@ public class Beetle
             }
         };
 
-        Console.WriteLine("Press Ctrl+C to stop recording");
+        // Wire up state for the OS console control handler so CTRL_CLOSE_EVENT
+        // (window closed), CTRL_LOGOFF_EVENT, and CTRL_SHUTDOWN_EVENT can save
+        // the recording before we're killed. The OS gives the handler ~5s on
+        // CLOSE and ~20s on LOGOFF/SHUTDOWN before TerminateProcess.
+        _session = session;
+        _traceEventSession = traceEventSession;
+        _logFilePath = logFilePath;
+        _task = task;
+        _consoleHandler = OnConsoleCtrl;
+        SetConsoleCtrlHandler(_consoleHandler, true);
+
+        Console.WriteLine($"Log: {logFilePath}");
+        Console.WriteLine("Press Ctrl+C to stop recording...");
 
         task.Wait();
 
-        session.StartTime = etwSource.SessionStartTime;
-        session.SessionEndTimeRelativeMSec = etwSource.SessionEndTimeRelativeMSec;
-
-        session.FinalizeSession();
-        SessionSerializer.Save(session, logFilePath);
-
-        Console.WriteLine($"Wrote {logFilePath}");
+        SaveNow();
     }
 
     public static void Start(string filePath)
     {
-        var executable = CurrentExecutable;
-        var arguments = filePath;
-        var psi = new System.Diagnostics.ProcessStartInfo(executable, arguments);
+        // Always launch via ShellExecute so the recorder gets its own console and is
+        // fully detached from the caller. Otherwise the recorder inherits the caller's console
+        // and gets killed by CTRL_CLOSE_EVENT when the caller (or the console host above it) is
+        // torn down — losing the recording with no chance to save.
+        var psi = new System.Diagnostics.ProcessStartInfo(CurrentExecutable, filePath)
+        {
+            UseShellExecute = true,
+        };
+
         if (!IsAdmin)
         {
-            psi.UseShellExecute = true;
             psi.Verb = "runas";
         }
 
@@ -257,6 +269,106 @@ public class Beetle
         public IntPtr Reserved2_1;
         public IntPtr UniqueProcessId;
         public IntPtr InheritedFromUniqueProcessId;
+    }
+
+    // Shared state used by both the normal exit path and the OS console control
+    // handler. SaveNow() guards against concurrent / double save.
+    private static Session _session;
+    private static TraceEventSession _traceEventSession;
+    private static string _logFilePath;
+    private static Task _task;
+    private static int _saveStarted;
+
+    // Rooted as a static field so the GC doesn't collect the delegate while
+    // the OS still holds a native function pointer to it.
+    private static HandlerRoutine _consoleHandler;
+
+    private delegate bool HandlerRoutine(uint ctrlType);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetConsoleCtrlHandler(
+        HandlerRoutine handler,
+        [MarshalAs(UnmanagedType.Bool)] bool add);
+
+    private const uint CTRL_C_EVENT        = 0;
+    private const uint CTRL_BREAK_EVENT    = 1;
+    private const uint CTRL_CLOSE_EVENT    = 2;
+    private const uint CTRL_LOGOFF_EVENT   = 5;
+    private const uint CTRL_SHUTDOWN_EVENT = 6;
+
+    private static bool OnConsoleCtrl(uint ctrlType)
+    {
+        if (ctrlType == CTRL_CLOSE_EVENT ||
+            ctrlType == CTRL_LOGOFF_EVENT ||
+            ctrlType == CTRL_SHUTDOWN_EVENT)
+        {
+            // We have ~5s (CLOSE) or ~20s (LOGOFF/SHUTDOWN) before the OS
+            // terminates us. Try to save synchronously inside the handler.
+            SaveNow();
+            return true;
+        }
+
+        // For Ctrl+C / Ctrl+Break, let Console.CancelKeyPress fire and the
+        // normal Main flow drive the save.
+        return false;
+    }
+
+    private static void SaveNow()
+    {
+        if (Interlocked.Exchange(ref _saveStarted, 1) != 0)
+        {
+            return;
+        }
+
+        var session = _session;
+        var traceEventSession = _traceEventSession;
+        var logFilePath = _logFilePath;
+        var task = _task;
+
+        if (session == null || traceEventSession == null || logFilePath == null)
+        {
+            return;
+        }
+
+        try
+        {
+            session.EventsLost = traceEventSession.EventsLost;
+            traceEventSession.Stop(noThrow: true);
+
+            // Best-effort drain of remaining buffered ETW events before serializing.
+            // Bounded so we don't blow past the OS shutdown timeout.
+            try { task?.Wait(TimeSpan.FromSeconds(3)); } catch { }
+
+            var source = traceEventSession.Source;
+            session.StartTime = source.SessionStartTime;
+            session.SessionEndTimeRelativeMSec = source.SessionEndTimeRelativeMSec;
+
+            session.FinalizeSession();
+
+            // Atomic write: serialize to a temp file then rename, so a kill
+            // mid-serialize never leaves a partially-written .beetle.
+            var tmp = logFilePath + ".tmp";
+            try
+            {
+                SessionSerializer.Save(session, tmp);
+                if (File.Exists(logFilePath))
+                {
+                    File.Delete(logFilePath);
+                }
+
+                File.Move(tmp, logFilePath);
+            }
+            catch
+            {
+                try { SessionSerializer.Save(session, logFilePath); } catch { }
+            }
+
+            Console.WriteLine($"Wrote {logFilePath}");
+        }
+        catch
+        {
+        }
     }
 
     public static void StopExistingSessions()
