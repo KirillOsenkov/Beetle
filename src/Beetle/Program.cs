@@ -57,7 +57,7 @@ public class Beetle
 
         if (!IsAdmin)
         {
-            StartProcessAsAdmin();
+            StartProcessAsAdmin(QuoteArg(logFilePath));
             return;
         }
 
@@ -204,6 +204,12 @@ public class Beetle
         psi.UseShellExecute = true;
         psi.Verb = "runas";
         return TryStartProcess(psi);
+    }
+
+    private static string QuoteArg(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        return s.IndexOf(' ') >= 0 ? "\"" + s + "\"" : s;
     }
 
     // ERROR_CANCELLED = user clicked No on the UAC prompt. Surface as a clean
